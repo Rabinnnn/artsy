@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ArtistArm — Makeup Robot Studio</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300&family=DM+Sans:wght@300;400;500&display=swap');
+
+  :root {
+    --bg:         #0e0b0f;
+    --surface:    #1a151c;
+    --border:     #2e2533;
+    --accent:     #c9607a;
+    --accent-dim: #7a3048;
+    --text:       #e8e0ec;
+    --muted:      #7a6e82;
+    --success:    #7ec8a0;
+    --radius:     8px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 300;
+    min-height: 100vh;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+  }
+
+  /* ── Header ── */
+  header {
+    padding: 24px 40px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+  }
+
+  header h1 {
+    font-family: 'Cormorant Garamond', serif;
+    font-weight: 300;
+    font-size: 1.8rem;
+    letter-spacing: 0.04em;
+    color: var(--text);
+  }
+
+  header h1 span { color: var(--accent); font-style: italic; }
+
+  .status-pill {
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 3px 10px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    transition: all 0.3s;
+  }
+  .status-pill.connected  { border-color: var(--success); color: var(--success); }
+  .status-pill.running    { border-color: var(--accent);  color: var(--accent);  }
+  .status-pill.error      { border-color: #e05; color: #e05; }
+
+  /* ── Main layout ── */
+  main {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    gap: 0;
+    overflow: hidden;
+  }
+
+  /* ── Sidebar ── */
+  aside {
+    border-right: 1px solid var(--border);
+    padding: 32px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    overflow-y: auto;
+  }
+
+  .section-label {
+    font-size: 0.68rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+
+  /* Upload zone */
+  .upload-zone {
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 28px 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+  }
+  .upload-zone:hover, .upload-zone.drag-over {
+    border-color: var(--accent);
+    background: rgba(201,96,122,0.05);
+  }
+  .upload-zone input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .upload-zone .icon { font-size: 2rem; margin-bottom: 8px; }
+  .upload-zone p { font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
+  .upload-zone p strong { color: var(--text); font-weight: 400; }
+
+  /* Action selector */
+  .action-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .action-btn {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 8px;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.2s;
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.82rem;
+    font-weight: 300;
+  }
+  .action-btn:hover   { border-color: var(--accent-dim); }
+  .action-btn.active  { border-color: var(--accent); background: rgba(201,96,122,0.1); color: var(--accent); }
+  .action-btn .emoji  { display: block; font-size: 1.4rem; margin-bottom: 4px; }
+
+  /* Color picker */
+  .color-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .color-swatches {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .swatch {
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+    transition: transform 0.15s, border-color 0.15s;
+  }
+  .swatch:hover    { transform: scale(1.15); }
+  .swatch.selected { border-color: var(--text); transform: scale(1.1); }
+
+  input[type="color"] {
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    background: none;
+    cursor: pointer;
+    padding: 0;
+  }
+
+  /* Apply button */
+  .apply-btn {
+    width: 100%;
+    padding: 14px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.9rem;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    cursor: pointer;
+    transition: opacity 0.2s, transform 0.1s;
+  }
+  .apply-btn:hover:not(:disabled) { opacity: 0.88; }
+  .apply-btn:active:not(:disabled) { transform: scale(0.98); }
+  .apply-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  /* Log */
+  .log {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    font-size: 0.75rem;
+    color: var(--muted);
+    line-height: 1.6;
+    min-height: 80px;
+    max-height: 120px;
+    overflow-y: auto;
+    font-family: 'DM Mono', 'Courier New', monospace;
+  }
+  .log .entry-ok   { color: var(--success); }
+  .log .entry-err  { color: #e05; }
+  .log .entry-info { color: var(--text); }
+
+  /* ── Canvas area ── */
+  .canvas-area {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px;
+    position: relative;
+    background:
+      radial-gradient(ellipse at 70% 30%, rgba(201,96,122,0.04) 0%, transparent 60%),
+      var(--bg);
+  }
+
+  .canvas-wrap {
+    position: relative;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 0 0 1px var(--border), 0 24px 64px rgba(0,0,0,0.5);
+    max-width: 100%;
+  }
+
+  #faceCanvas, #drawCanvas {
+    display: block;
+    max-width: 100%;
+  }
+
+  #drawCanvas {
+    position: absolute;
+    top: 0; left: 0;
+    pointer-events: none;
+  }
+
+  .empty-state {
+    text-align: center;
+    color: var(--muted);
+  }
+  .empty-state .big-icon { font-size: 4rem; margin-bottom: 16px; opacity: 0.4; }
+  .empty-state p { font-size: 0.88rem; line-height: 1.7; }
+  .empty-state em {
+    font-family: 'Cormorant Garamond', serif;
+    font-style: italic;
+    font-size: 1.1rem;
+    color: var(--text);
+    display: block;
+    margin-bottom: 8px;
+  }
+
+  /* Progress bar */
+  .progress-bar {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--border);
+    overflow: hidden;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .progress-bar.visible { opacity: 1; }
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+    width: 0%;
+    transition: width 0.1s linear;
+  }
+
+  /* Footer */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 12px 40px;
+    font-size: 0.72rem;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  /* Undo button */
+  .undo-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--muted);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.78rem;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition: border-color 0.2s, color 0.2s;
+  }
+  .undo-btn:hover { border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Artist<span>Arm</span></h1>
+  <div class="status-pill" id="statusPill">disconnected</div>
+</header>
+
+<main>
+  <!-- ── Sidebar ── -->
+  <aside>
+
+    <!-- Upload -->
+    <div>
+      <div class="section-label">Face Image</div>
+      <div class="upload-zone" id="uploadZone">
+        <input type="file" id="fileInput" accept="image/*">
+        <div class="icon">🖼</div>
+        <p><strong>Drop a face photo here</strong><br>or click to browse</p>
+      </div>
+    </div>
+
+    <!-- Action selector — populated dynamically from server -->
+    <div>
+      <div class="section-label">Makeup Action</div>
+      <div class="action-grid" id="actionGrid">
+        <!-- injected by JS -->
+      </div>
+    </div>
+
+    <!-- Color -->
+    <div>
+      <div class="section-label">Color</div>
+      <div class="color-row">
+        <div class="color-swatches" id="swatches">
+          <div class="swatch selected" style="background:#cc2244" data-color="#cc2244"></div>
+          <div class="swatch" style="background:#e8735a" data-color="#e8735a"></div>
+          <div class="swatch" style="background:#b5416e" data-color="#b5416e"></div>
+          <div class="swatch" style="background:#f4a9b8" data-color="#f4a9b8"></div>
+          <div class="swatch" style="background:#8b1a3a" data-color="#8b1a3a"></div>
+          <div class="swatch" style="background:#d45030" data-color="#d4550"></div>
+        </div>
+        <input type="color" id="customColor" title="Custom color" value="#cc2244">
+      </div>
+    </div>
+
+    <!-- Apply -->
+    <button class="apply-btn" id="applyBtn" disabled>Apply Makeup</button>
+
+    <!-- Undo -->
+    <button class="undo-btn" id="undoBtn">↩ Undo last stroke</button>
+
+    <!-- Log -->
+    <div>
+      <div class="section-label">Activity</div>
+      <div class="log" id="log"><span class="entry-info">Waiting for connection…</span></div>
+    </div>
+
+  </aside>
+
+  <!-- ── Canvas area ── -->
+  <div class="canvas-area" id="canvasArea">
+    <div class="empty-state" id="emptyState">
+      <div class="big-icon">💄</div>
+      <em>Upload a face photo to begin</em>
+      <p>The arm will apply makeup in simulation<br>and mirror every stroke onto your image.</p>
+    </div>
+
+    <div class="canvas-wrap" id="canvasWrap" style="display:none">
+      <canvas id="faceCanvas"></canvas>
+      <canvas id="drawCanvas"></canvas>
+      <div class="progress-bar" id="progressBar"><div class="progress-fill" id="progressFill"></div></div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  <span>SO-101 Makeup Artist Robot — Simulation Mode</span>
+  <span id="footerModel">—</span>
+</footer>
+
+<!-- MediaPipe Face Mesh via CDN -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════
+
+const state = {
+  ws:             null,
+  connected:      false,
+  selectedAction: null,
+  selectedColor:  '#cc2244',
+  landmarks:      null,       // MediaPipe face landmarks
+  imageLoaded:    false,
+  running:        false,
+  motionRegion:   null,       // which region is active ("lips", "left_eye" …)
+  motionJoints:   null,       // which joints drive horizontal/vertical
+  strokeHistory:  [],         // for undo
+  currentStroke:  [],         // points in the current stroke
+  availableActions: {},       // populated from server on connect
+};
+
+// ═══════════════════════════════════════════════════════════════
+// MediaPipe landmark indices for each facial region
+// Add new regions here as new makeup actions are introduced
+// ═══════════════════════════════════════════════════════════════
+
+const REGION_LANDMARKS = {
+  lips: {
+    // Outer lip contour indices from Face Mesh 468-point map
+    outer: [61,146,91,181,84,17,314,405,321,375,291,308,324,318,402,317,14,87,178,88,95],
+    inner: [78,191,80,81,82,13,312,311,310,415,308,324,318,402,317,14,87,178,88,95,78],
+    // Bounding hint joints: _1 = horizontal sweep, _2 = vertical
+    horizontalJoint: '_1',
+    verticalJoint:   '_2',
+  },
+  left_eye: {
+    outer: [33,7,163,144,145,153,154,155,133,173,157,158,159,160,161,246],
+    inner: [133,155,154,153,145,144,163,7],
+    horizontalJoint: '_1',
+    verticalJoint:   '_2',
+  },
+  right_eye: {
+    outer: [362,382,381,380,374,373,390,249,263,466,388,387,386,385,384,398],
+    inner: [263,249,390,373,374,380,381,382],
+    horizontalJoint: '_1',
+    verticalJoint:   '_2',
+  },
+  left_cheek: {
+    outer: [116,117,118,119,120,121,128,126,142,36,205,187,50,118],
+    inner: [116,117,118,119,120,121,128,126,142,36,205,187,50,118],
+    horizontalJoint: '_1',
+    verticalJoint:   '_2',
+  },
+};
+
+// ═══════════════════════════════════════════════════════════════
+// DOM refs
+// ═══════════════════════════════════════════════════════════════
+
+const faceCanvas  = document.getElementById('faceCanvas');
+const drawCanvas  = document.getElementById('drawCanvas');
+const faceCtx     = faceCanvas.getContext('2d');
+const drawCtx     = drawCanvas.getContext('2d');
+const canvasWrap  = document.getElementById('canvasWrap');
+const emptyState  = document.getElementById('emptyState');
+const applyBtn    = document.getElementById('applyBtn');
+const undoBtn     = document.getElementById('undoBtn');
+const statusPill  = document.getElementById('statusPill');
+const logEl       = document.getElementById('log');
+const actionGrid  = document.getElementById('actionGrid');
+const progressBar = document.getElementById('progressBar');
+const progressFill= document.getElementById('progressFill');
+
+// ═══════════════════════════════════════════════════════════════
+// Logging
+// ═══════════════════════════════════════════════════════════════
+
+function log(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `entry-${type}`;
+  el.textContent = msg;
+  logEl.appendChild(el);
+  logEl.scrollTop = logEl.scrollHeight;
+  if (logEl.children.length > 40) logEl.removeChild(logEl.firstChild);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// WebSocket
+// ═══════════════════════════════════════════════════════════════
+
+function connect() {
+  const ws = new WebSocket('ws://localhost:8765');
+  state.ws = ws;
+
+  ws.onopen = () => {
+    state.connected = true;
+    statusPill.textContent = 'connected';
+    statusPill.className   = 'status-pill connected';
+    log('Connected to ArtistArm server.', 'ok');
+    updateApplyBtn();
+  };
+
+  ws.onclose = () => {
+    state.connected = false;
+    statusPill.textContent = 'disconnected';
+    statusPill.className   = 'status-pill';
+    log('Disconnected. Retrying in 3s…', 'err');
+    setTimeout(connect, 3000);
+  };
+
+  ws.onerror = () => {
+    log('Connection error — is server.py running?', 'err');
+  };
+
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+    handleMessage(msg);
+  };
+}
+
+function handleMessage(msg) {
+  switch (msg.type) {
+
+    case 'ready':
+      state.availableActions = msg.actions;
+      buildActionGrid(msg.actions);
+      log('Robot ready. Select an action and upload a face photo.', 'ok');
+      break;
+
+    case 'motion_start':
+      state.running      = true;
+      state.motionRegion = msg.region;
+      state.motionJoints = msg.joints;
+      state.currentStroke = [];
+      statusPill.textContent = 'running';
+      statusPill.className   = 'status-pill running';
+      progressBar.classList.add('visible');
+      progressFill.style.width = '0%';
+      applyBtn.disabled = true;
+      log(`▶ Starting ${msg.action}…`, 'info');
+      break;
+
+    case 'joint_update':
+      if (state.imageLoaded && state.landmarks && state.running) {
+        drawStrokeFromJoints(msg.joints, msg.color, msg.action);
+      }
+      break;
+
+    case 'action_start':
+      const pct = ((msg.step - 1) / msg.total) * 100;
+      progressFill.style.width = pct + '%';
+      break;
+
+    case 'say':
+      log(`💬 ${msg.text}`, 'info');
+      break;
+
+    case 'done':
+      state.running = false;
+      if (state.currentStroke.length > 0) {
+        state.strokeHistory.push([...state.currentStroke]);
+        state.currentStroke = [];
+      }
+      statusPill.textContent = 'connected';
+      statusPill.className   = 'status-pill connected';
+      progressFill.style.width = '100%';
+      setTimeout(() => progressBar.classList.remove('visible'), 600);
+      applyBtn.disabled = false;
+      log('✓ Motion complete.', 'ok');
+      break;
+
+    case 'error':
+      log(`❌ ${msg.message}`, 'err');
+      state.running     = false;
+      applyBtn.disabled = false;
+      break;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Action grid — built dynamically from server response
+// ═══════════════════════════════════════════════════════════════
+
+const ACTION_EMOJIS = {
+  lipstick:  '💄',
+  eyeliner:  '✏️',
+  blush:     '🌸',
+  eyebrow:   '〰️',
+  eyeshadow: '👁',
+};
+
+function buildActionGrid(actions) {
+  actionGrid.innerHTML = '';
+  Object.entries(actions).forEach(([key, def]) => {
+    const btn = document.createElement('button');
+    btn.className   = 'action-btn';
+    btn.dataset.key = key;
+    btn.innerHTML   = `<span class="emoji">${ACTION_EMOJIS[key] || '💅'}</span>${def.label}`;
+    btn.addEventListener('click', () => selectAction(key, btn));
+    actionGrid.appendChild(btn);
+  });
+
+  // Auto-select first action
+  const first = actionGrid.querySelector('.action-btn');
+  if (first) selectAction(first.dataset.key, first);
+}
+
+function selectAction(key, btn) {
+  state.selectedAction = key;
+  actionGrid.querySelectorAll('.action-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  updateApplyBtn();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Color selection
+// ═══════════════════════════════════════════════════════════════
+
+document.querySelectorAll('.swatch').forEach(sw => {
+  sw.addEventListener('click', () => {
+    document.querySelectorAll('.swatch').forEach(s => s.classList.remove('selected'));
+    sw.classList.add('selected');
+    state.selectedColor = sw.dataset.color;
+    document.getElementById('customColor').value = sw.dataset.color;
+  });
+});
+
+document.getElementById('customColor').addEventListener('input', e => {
+  state.selectedColor = e.target.value;
+  document.querySelectorAll('.swatch').forEach(s => s.classList.remove('selected'));
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Image upload + MediaPipe
+// ═══════════════════════════════════════════════════════════════
+
+const fileInput  = document.getElementById('fileInput');
+const uploadZone = document.getElementById('uploadZone');
+
+uploadZone.addEventListener('dragover',  e => { e.preventDefault(); uploadZone.classList.add('drag-over'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('drag-over'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault();
+  uploadZone.classList.remove('drag-over');
+  if (e.dataTransfer.files[0]) loadImage(e.dataTransfer.files[0]);
+});
+
+fileInput.addEventListener('change', e => {
+  if (e.target.files[0]) loadImage(e.target.files[0]);
+});
+
+function loadImage(file) {
+  const reader = new FileReader();
+  reader.onload = evt => {
+    const img = new Image();
+    img.onload = () => {
+      // Size canvas to image, max 640px wide
+      const maxW = 640;
+      const scale = img.width > maxW ? maxW / img.width : 1;
+      faceCanvas.width  = drawCanvas.width  = Math.round(img.width  * scale);
+      faceCanvas.height = drawCanvas.height = Math.round(img.height * scale);
+
+      faceCtx.drawImage(img, 0, 0, faceCanvas.width, faceCanvas.height);
+
+      emptyState.style.display = 'none';
+      canvasWrap.style.display = 'block';
+
+      state.imageLoaded = true;
+      state.strokeHistory = [];
+      drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+
+      log('Image loaded. Detecting face landmarks…', 'info');
+      detectLandmarks(img);
+      updateApplyBtn();
+    };
+    img.src = evt.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+// ── MediaPipe Face Mesh ──
+
+let faceMesh = null;
+
+function initFaceMesh() {
+  faceMesh = new FaceMesh({
+    locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`,
+  });
+  faceMesh.setOptions({
+    maxNumFaces:          1,
+    refineLandmarks:      true,
+    minDetectionConfidence: 0.5,
+    minTrackingConfidence:  0.5,
+  });
+  faceMesh.onResults(onFaceMeshResults);
+}
+
+function detectLandmarks(img) {
+  if (!faceMesh) initFaceMesh();
+  faceMesh.send({ image: img });
+}
+
+function onFaceMeshResults(results) {
+  if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
+    log('⚠ No face detected. Try a clearer front-facing photo.', 'err');
+    return;
+  }
+  state.landmarks = results.multiFaceLandmarks[0];
+  log(`✓ Face detected — ${state.landmarks.length} landmarks mapped.`, 'ok');
+  drawLandmarkHints();
+  updateApplyBtn();
+}
+
+// Draw subtle landmark dots so the user can see detection worked
+function drawLandmarkHints() {
+  if (!state.landmarks) return;
+  drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+
+  const lips = REGION_LANDMARKS.lips;
+  const allLipIdx = [...new Set([...lips.outer, ...lips.inner])];
+
+  drawCtx.fillStyle = 'rgba(201,96,122,0.5)';
+  allLipIdx.forEach(i => {
+    const lm = state.landmarks[i];
+    const x  = lm.x * drawCanvas.width;
+    const y  = lm.y * drawCanvas.height;
+    drawCtx.beginPath();
+    drawCtx.arc(x, y, 1.5, 0, Math.PI * 2);
+    drawCtx.fill();
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Stroke drawing — maps joint angles → canvas pixels
+// ═══════════════════════════════════════════════════════════════
+
+// Angle→pixel mapping constants
+const H_ANGLE_RANGE = 20;  // ±20° of _1 maps to full lip width
+const V_ANGLE_RANGE = 35;  // ±35° of _2 maps to relevant vertical range
+
+function getLipBounds() {
+  if (!state.landmarks) return null;
+  const lips = REGION_LANDMARKS.lips;
+  const idx  = [...new Set([...lips.outer, ...lips.inner])];
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  idx.forEach(i => {
+    const lm = state.landmarks[i];
+    const x  = lm.x * drawCanvas.width;
+    const y  = lm.y * drawCanvas.height;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  });
+  return { minX, maxX, minY, maxY, cx: (minX+maxX)/2, cy: (minY+maxY)/2 };
+}
+
+function getRegionBounds(region) {
+  if (!state.landmarks) return null;
+  const def = REGION_LANDMARKS[region];
+  if (!def) return null;
+  const idx = [...new Set([...def.outer, ...(def.inner || [])])];
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  idx.forEach(i => {
+    const lm = state.landmarks[i];
+    const x  = lm.x * drawCanvas.width;
+    const y  = lm.y * drawCanvas.height;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  });
+  return { minX, maxX, minY, maxY, cx: (minX+maxX)/2, cy: (minY+maxY)/2 };
+}
+
+function drawStrokeFromJoints(joints, color, action) {
+  const region = state.motionRegion || 'lips';
+  const bounds = getRegionBounds(region);
+  if (!bounds) return;
+
+  const hJoint = (state.motionJoints && state.motionJoints.horizontal) || '_1';
+  const vJoint = (state.motionJoints && state.motionJoints.vertical)   || '_2';
+
+  const hAngle = joints[hJoint] || 0;
+  const vAngle = joints[vJoint] || 0;
+
+  // Map joint angle to pixel offset within the region bounding box
+  const hRatio = hAngle / H_ANGLE_RANGE;   // -1 … +1
+  const vRatio = vAngle / V_ANGLE_RANGE;
+
+  const halfW  = (bounds.maxX - bounds.minX) / 2;
+  const halfH  = (bounds.maxY - bounds.minY) / 2;
+
+  const x = bounds.cx + hRatio * halfW;
+  const y = bounds.cy + vRatio * halfH * 0.4;  // vertical motion is subtle
+
+  state.currentStroke.push({ x, y, color });
+
+  // Draw as a soft brush stroke
+  const pts = state.currentStroke;
+  if (pts.length < 2) return;
+
+  const prev = pts[pts.length - 2];
+  const curr = pts[pts.length - 1];
+
+  drawCtx.save();
+  drawCtx.globalAlpha      = 0.55;
+  drawCtx.globalCompositeOperation = 'multiply';
+  drawCtx.strokeStyle      = color;
+  drawCtx.lineWidth        = region === 'lips' ? 7 : 4;
+  drawCtx.lineCap          = 'round';
+  drawCtx.lineJoin         = 'round';
+  drawCtx.beginPath();
+  drawCtx.moveTo(prev.x, prev.y);
+  drawCtx.lineTo(curr.x, curr.y);
+  drawCtx.stroke();
+  drawCtx.restore();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Undo
+// ═══════════════════════════════════════════════════════════════
+
+undoBtn.addEventListener('click', () => {
+  if (state.strokeHistory.length === 0) return;
+  state.strokeHistory.pop();
+  redrawAllStrokes();
+  drawLandmarkHints();
+  log('Undid last stroke.', 'info');
+});
+
+function redrawAllStrokes() {
+  drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+  state.strokeHistory.forEach(stroke => {
+    for (let i = 1; i < stroke.length; i++) {
+      const prev = stroke[i-1];
+      const curr = stroke[i];
+      drawCtx.save();
+      drawCtx.globalAlpha      = 0.55;
+      drawCtx.globalCompositeOperation = 'multiply';
+      drawCtx.strokeStyle      = curr.color;
+      drawCtx.lineWidth        = 7;
+      drawCtx.lineCap          = 'round';
+      drawCtx.lineJoin         = 'round';
+      drawCtx.beginPath();
+      drawCtx.moveTo(prev.x, prev.y);
+      drawCtx.lineTo(curr.x, curr.y);
+      drawCtx.stroke();
+      drawCtx.restore();
+    }
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Apply button
+// ═══════════════════════════════════════════════════════════════
+
+function updateApplyBtn() {
+  applyBtn.disabled = !(
+    state.connected &&
+    state.imageLoaded &&
+    state.landmarks &&
+    state.selectedAction &&
+    !state.running
+  );
+}
+
+applyBtn.addEventListener('click', () => {
+  if (!state.ws || !state.connected || state.running) return;
+  state.ws.send(JSON.stringify({
+    type:   'apply',
+    action: state.selectedAction,
+    color:  state.selectedColor,
+  }));
+  log(`Sending "${state.selectedAction}" with color ${state.selectedColor}…`, 'info');
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Init
+// ═══════════════════════════════════════════════════════════════
+
+connect();
+</script>
+</body>
+</html>
