@@ -56,18 +56,124 @@ TWIN_ASSET_KEY   = "the-robot-studio/so101"
 #   joints    — which joints drive the canvas stroke (horizontal, vertical)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Lipstick motion tuning
+# ---------------------------------------------------------------------------
+# ARM POSITION
+LIFT_HEIGHT     = -28.0   # _2: shoulder lift toward face height (more negative = higher)
+REACH_FORWARD   =  18.0   # _3: elbow extension toward face (bigger = further forward)
+WRIST_TILT_DOWN =  -8.0   # _4: wrist tilts down at centre of lips (negative = tip down)
+WRIST_TILT_FLAT =   0.0   # _4: wrist levels out at lip corners
+
+# STROKE ANGLES — how far _1 sweeps left/right
+CENTRE_ANGLE    =   0.0   # _1: centre of lips
+LEFT_CORNER     =  13.0   # _1: left corner of lips  (positive = arm swings left)
+RIGHT_CORNER    = -13.0   # _1: right corner of lips (negative = arm swings right)
+
+# STROKE SPEEDS — duration in seconds per segment
+APPROACH_DUR    =  1.2    # time to lift and extend toward face
+CENTRE_PAUSE    =  0.35   # brief press at centre before stroking
+UPPER_SWEEP_DUR =  0.50   # duration of each upper lip segment (centre→corner)
+LOWER_SWEEP_DUR =  0.65   # duration of each lower lip sweep (fuller, slower)
+BLOT_OUT_DUR    =  0.18   # quick forward press for blot
+BLOT_IN_DUR     =  0.18   # quick pullback for blot
+RETREAT_DUR     =  1.5    # time to return home
+
+# REPETITIONS — how many times each phase repeats
+# Set to 1 for a single clean pass; 2–3 for more coverage
+UPPER_LIP_REPS  =  2      # number of full upper lip passes (centre→left→centre→right)
+LOWER_LIP_REPS  =  2      # number of full lower lip sweeps (left→right)
+BLOT_REPS       =  1      # number of blot dabs at the end
+
+
 def _lipstick_plan() -> MotionPlan:
-    return MotionPlan(
-        say="Applying lipstick.",
-        actions=[
-            Action(type="set_pose",  pose={"_2": -25.0, "_3": 15.0}, duration=1.2),
-            Action(type="wait",      duration=0.4),
-            Action(type="set_joint", joint="_1", angle=10.0,  duration=0.6),
-            Action(type="set_joint", joint="_1", angle=-10.0, duration=0.6),
-            Action(type="set_joint", joint="_1", angle=0.0,   duration=0.6),
-            Action(type="home",      duration=1.5),
-        ],
-    )
+    """Natural lipstick application sequence:
+      1. Approach  — lift arm to face height and extend forward
+      2. Upper lip — centre → left corner → centre → right corner (×UPPER_LIP_REPS)
+      3. Lower lip — left → right full sweep (×LOWER_LIP_REPS)
+      4. Blot      — small forward dab to set the colour (×BLOT_REPS)
+      5. Retreat   — smooth return to home
+    """
+    actions: list[Action] = []
+
+    # ── 1. Approach ──────────────────────────────────────────────
+    actions.append(Action(
+        type="set_pose",
+        pose={"_2": LIFT_HEIGHT, "_3": REACH_FORWARD, "_4": WRIST_TILT_DOWN},
+        duration=APPROACH_DUR,
+    ))
+    actions.append(Action(type="wait", duration=CENTRE_PAUSE))
+
+    # ── 2. Upper lip passes ───────────────────────────────────────
+    # Traces the cupid's bow: centre → left corner → centre → right corner
+    # _1 sweeps horizontally; _4 levels out at corners to follow the bow curve
+    for _ in range(UPPER_LIP_REPS):
+        # Centre → left corner (wrist levels as arm swings out)
+        actions.append(Action(
+            type="set_pose",
+            pose={"_1": LEFT_CORNER, "_4": WRIST_TILT_FLAT},
+            duration=UPPER_SWEEP_DUR,
+        ))
+        # Left corner → centre (wrist dips back down at centre)
+        actions.append(Action(
+            type="set_pose",
+            pose={"_1": CENTRE_ANGLE, "_4": WRIST_TILT_DOWN},
+            duration=UPPER_SWEEP_DUR,
+        ))
+        # Centre → right corner
+        actions.append(Action(
+            type="set_pose",
+            pose={"_1": RIGHT_CORNER, "_4": WRIST_TILT_FLAT},
+            duration=UPPER_SWEEP_DUR,
+        ))
+        # Right corner → centre
+        actions.append(Action(
+            type="set_pose",
+            pose={"_1": CENTRE_ANGLE, "_4": WRIST_TILT_DOWN},
+            duration=UPPER_SWEEP_DUR,
+        ))
+
+    # ── 3. Lower lip sweeps ───────────────────────────────────────
+    # Fuller, slower sweep across the lower lip
+    # _4 tilts slightly upward for lower lip (opposite of upper)
+    for _ in range(LOWER_LIP_REPS):
+        # Sweep left to right
+        actions.append(Action(
+            type="set_pose",
+            pose={"_1": LEFT_CORNER, "_4": 5.0},
+            duration=LOWER_SWEEP_DUR,
+        ))
+        actions.append(Action(
+            type="set_pose",
+            pose={"_1": RIGHT_CORNER, "_4": 5.0},
+            duration=LOWER_SWEEP_DUR,
+        ))
+
+    # Return to centre after lower lip
+    actions.append(Action(
+        type="set_pose",
+        pose={"_1": CENTRE_ANGLE, "_4": WRIST_TILT_DOWN},
+        duration=UPPER_SWEEP_DUR,
+    ))
+
+    # ── 4. Blot ───────────────────────────────────────────────────
+    # Small forward press to set the colour, like pressing lips together
+    for _ in range(BLOT_REPS):
+        actions.append(Action(
+            type="set_joint", joint="_3",
+            angle=REACH_FORWARD + 5.0,
+            duration=BLOT_OUT_DUR,
+        ))
+        actions.append(Action(
+            type="set_joint", joint="_3",
+            angle=REACH_FORWARD,
+            duration=BLOT_IN_DUR,
+        ))
+
+    # ── 5. Retreat ────────────────────────────────────────────────
+    actions.append(Action(type="home", duration=RETREAT_DUR))
+
+    return MotionPlan(say="Applying lipstick.", actions=actions)
 
 
 # Registry — add new actions here as the project grows

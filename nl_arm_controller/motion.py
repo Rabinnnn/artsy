@@ -43,7 +43,7 @@ DEFAULT_JOINT_LIMITS: dict[str, tuple[float, float]] = {
 }
 
 MAX_DURATION_S: float = 5.0
-MAX_ACTIONS_PER_PLAN: int = 8
+MAX_ACTIONS_PER_PLAN: int = 32  # raised to support multi-step makeup sequences
 DEFAULT_DURATION_S: float = 1.0
 RAMP_HZ: int = 20
 
@@ -92,13 +92,12 @@ class Action:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Action":
         raw_joint = data.get("joint")
-        raw_pose = data.get("pose")
+        raw_pose  = data.get("pose")
         return cls(
             type=data["type"],
             joint=_normalize_joint(raw_joint) if raw_joint is not None else None,
             angle=data.get("angle"),
-            pose={_normalize_joint(j): v for j, v in raw_joint.items()} if isinstance(raw_joint, dict) else
-                 {_normalize_joint(j): v for j, v in raw_pose.items()} if raw_pose is not None else None,
+            pose={_normalize_joint(j): v for j, v in raw_pose.items()} if raw_pose is not None else None,
             duration=float(data.get("duration", DEFAULT_DURATION_S)),
         )
 
