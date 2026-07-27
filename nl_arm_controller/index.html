@@ -417,11 +417,30 @@ const REGION_LANDMARKS = {
     horizontalJoint: '_1',
     verticalJoint:   '_2',
   },
-  left_eye: {
-    outer: [33,7,163,144,145,153,154,155,133,173,157,158,159,160,161,246],
-    inner: [133,155,154,153,145,144,163,7],
+  left_eyebrow: {
+    // Left eyebrow — ordered inner corner → arch → outer corner (left→right)
+    outer: [46, 53, 52, 65, 55, 107, 66, 105, 63, 70],
+    inner: [46, 53, 52, 65, 55, 107, 66, 105, 63, 70],
     horizontalJoint: '_1',
     verticalJoint:   '_2',
+    ordered: true,   // already in sweep order — skip x-sort
+  },
+  right_eyebrow: {
+    // Right eyebrow — ordered inner corner → arch → outer corner (right→left, mirrored)
+    outer: [276, 283, 282, 295, 285, 336, 296, 334, 293, 300],
+    inner: [276, 283, 282, 295, 285, 336, 296, 334, 293, 300],
+    horizontalJoint: '_1',
+    verticalJoint:   '_2',
+    ordered: true,   // already in sweep order — skip x-sort
+  },
+  both_eyebrows: {
+    outer: [46, 53, 52, 65, 55, 107, 66, 105, 63, 70,
+            276, 283, 282, 295, 285, 336, 296, 334, 293, 300],
+    inner: [46, 53, 52, 65, 55, 107, 66, 105, 63, 70,
+            276, 283, 282, 295, 285, 336, 296, 334, 293, 300],
+    horizontalJoint: '_1',
+    verticalJoint:   '_2',
+    ordered: true,
   },
   right_eye: {
     outer: [362,382,381,380,374,373,390,249,263,466,388,387,386,385,384,398],
@@ -579,11 +598,13 @@ function handleMessage(msg) {
 // ═══════════════════════════════════════════════════════════════
 
 const ACTION_EMOJIS = {
-  lipstick:  '💄',
-  eyeliner:  '✏️',
-  blush:     '🌸',
-  eyebrow:   '〰️',
-  eyeshadow: '👁',
+  lipstick:      '💄',
+  left_eyebrow:  '〰️',
+  right_eyebrow: '〰️',
+  both_eyebrows: '✏️',
+  eyeliner:      '👁',
+  blush:         '🌸',
+  eyeshadow:     '💜',
 };
 
 function buildActionGrid(actions) {
@@ -709,51 +730,47 @@ function onFaceMeshResults(results) {
   updateApplyBtn();
 }
 
-// Draw landmark dots + outline so the user can verify full lip coverage
+// Draw landmark dots + outline so the user can verify detection coverage
 function drawLandmarkHints() {
   if (!state.landmarks) return;
   drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
 
-  const lips = REGION_LANDMARKS.lips;
+  // Always draw lip hints
+  _drawRegionHints('lips', 'rgba(201,96,122,0.4)', 'rgba(201,96,122,0.6)', true);
 
-  // Helper: landmark index → canvas coords
+  // Draw eyebrow hints
+  _drawRegionHints('left_eyebrow',  'rgba(120,160,220,0.5)', 'rgba(120,160,220,0.8)', false);
+  _drawRegionHints('right_eyebrow', 'rgba(120,160,220,0.5)', 'rgba(120,160,220,0.8)', false);
+}
+
+function _drawRegionHints(region, outlineColor, dotColor, splitHalves) {
+  const def = REGION_LANDMARKS[region];
+  if (!def) return;
+
   const pt = i => ({
     x: state.landmarks[i].x * drawCanvas.width,
     y: state.landmarks[i].y * drawCanvas.height,
   });
 
-  // Draw outer lip outline
+  // Draw outline — open path for eyebrows, closed for lips
   drawCtx.beginPath();
-  lips.outer.forEach((idx, i) => {
+  def.outer.forEach((idx, i) => {
     const { x, y } = pt(idx);
     i === 0 ? drawCtx.moveTo(x, y) : drawCtx.lineTo(x, y);
   });
-  drawCtx.closePath();
-  drawCtx.strokeStyle = 'rgba(201,96,122,0.4)';
+  if (!def.ordered) drawCtx.closePath();  // only close lips, not eyebrows
+  drawCtx.strokeStyle = outlineColor;
   drawCtx.lineWidth   = 1;
   drawCtx.stroke();
 
-  // Draw inner lip outline
-  drawCtx.beginPath();
-  lips.inner.forEach((idx, i) => {
-    const { x, y } = pt(idx);
-    i === 0 ? drawCtx.moveTo(x, y) : drawCtx.lineTo(x, y);
-  });
-  drawCtx.closePath();
-  drawCtx.strokeStyle = 'rgba(201,96,122,0.25)';
-  drawCtx.stroke();
-
-  // Draw dots on every landmark point
-  const allIdx = [...new Set([...lips.outer, ...lips.inner])];
+  // Draw dots
+  const allIdx = [...new Set([...def.outer, ...(def.inner || [])])];
   allIdx.forEach(i => {
     const { x, y } = pt(i);
-    // Upper lip points (indices in outer[0..10] and inner[0..10]) slightly larger
-    const isUpper = lips.outer.slice(0, 11).includes(i) || lips.inner.slice(0, 11).includes(i);
-    drawCtx.fillStyle = isUpper
-      ? 'rgba(220, 100, 130, 0.85)'   // brighter for upper lip
-      : 'rgba(201, 96, 122, 0.6)';    // dimmer for lower lip
+    const isUpper = splitHalves && def.outer.slice(0, 11).includes(i);
+    drawCtx.fillStyle = isUpper ? 'rgba(220,100,130,0.85)' : dotColor;
     drawCtx.beginPath();
-    drawCtx.arc(x, y, isUpper ? 2 : 1.5, 0, Math.PI * 2);
+    drawCtx.arc(x, y, 1.8, 0, Math.PI * 2);
     drawCtx.fill();
   });
 }
@@ -768,32 +785,58 @@ const V_ANGLE_RANGE = 35;   // _2 vertical sensitivity
 
 // Brush settings per region — add new regions here as actions are added
 const BRUSH = {
-  lips:      { width: 12,  alpha: 0.52, blend: 'multiply' },
-  left_eye:  { width: 2,  alpha: 0.80, blend: 'multiply' },
-  right_eye: { width: 2,  alpha: 0.80, blend: 'multiply' },
-  left_cheek:{ width: 18, alpha: 0.22, blend: 'multiply' },
-  _default:  { width: 5,  alpha: 0.55, blend: 'multiply' },
+  lips:          { width: 8,  alpha: 0.52, blend: 'multiply' },
+  left_eyebrow:  { width: 3,  alpha: 0.75, blend: 'multiply' },
+  right_eyebrow: { width: 3,  alpha: 0.75, blend: 'multiply' },
+  both_eyebrows: { width: 3,  alpha: 0.75, blend: 'multiply' },
+  left_eye:      { width: 2,  alpha: 0.80, blend: 'multiply' },
+  right_eye:     { width: 2,  alpha: 0.80, blend: 'multiply' },
+  left_cheek:    { width: 18, alpha: 0.22, blend: 'multiply' },
+  _default:      { width: 5,  alpha: 0.55, blend: 'multiply' },
 };
 
 // Build a sorted spine of landmark points for a region,
 // ordered left→right by x coordinate, for curve-following
 function buildLipSpine(region, half) {
-  // half: 'upper' | 'lower' | 'all'
   if (!state.landmarks) return [];
   const def = REGION_LANDMARKS[region];
   if (!def) return [];
 
   let indices;
-  if (half === 'upper')      indices = def.outer.slice(0, 11);
-  else if (half === 'lower') indices = def.outer.slice(11);
-  else                       indices = [...new Set([...def.outer, ...def.inner])];
+  if (region === 'lips') {
+    if (half === 'upper')      indices = def.outer.slice(0, 11);
+    else if (half === 'lower') indices = def.outer.slice(11);
+    else                       indices = [...new Set([...def.outer, ...def.inner])];
+  } else {
+    indices = [...new Set([...def.outer, ...(def.inner || [])])];
+  }
 
-  return indices
-    .map(i => ({
-      x: state.landmarks[i].x * drawCanvas.width,
-      y: state.landmarks[i].y * drawCanvas.height,
-    }))
-    .sort((a, b) => a.x - b.x);
+  const points = indices.map(i => ({
+    x: state.landmarks[i].x * drawCanvas.width,
+    y: state.landmarks[i].y * drawCanvas.height,
+  }));
+
+  // Only sort by x for non-ordered regions (lips).
+  // Eyebrows use pre-ordered indices that follow the brow curve naturally.
+  if (!def.ordered) {
+    points.sort((a, b) => a.x - b.x);
+  }
+
+  return points;
+}
+
+// For both_eyebrows: pick left or right spine based on _1 angle
+function getSpineForRegion(region, hAngle, wrist4) {
+  if (region === 'both_eyebrows') {
+    // Positive _1 = arm on left side of face = left eyebrow
+    const side = hAngle >= 0 ? 'left_eyebrow' : 'right_eyebrow';
+    return getSpine(side, 'all');
+  }
+  if (region === 'lips') {
+    const half = wrist4 >= 3 ? 'lower' : 'upper';
+    return getSpine(region, half);
+  }
+  return getSpine(region, 'all');
 }
 
 // Given a normalised t (0=left edge, 1=right edge), interpolate along the spine
@@ -822,46 +865,53 @@ function getSpine(region, half) {
 function clearSpineCache() { _spineCache = {}; }
 
 function drawStrokeFromJoints(joints, color, action) {
-  const region  = state.motionRegion || 'lips';
-  const hJoint  = (state.motionJoints && state.motionJoints.horizontal) || '_1';
-  const wrist4  = joints['_4'] || 0;
-  const hAngle  = joints[hJoint] || 0;
+  const region    = state.motionRegion || 'lips';
+  const hJoint    = (state.motionJoints && state.motionJoints.horizontal) || '_1';
+  const wrist4    = joints['_4'] || 0;
+  const hAngle    = joints[hJoint] || 0;
+  const isEyebrow = region.includes('eyebrow');
 
-  // ── Gate: block painting until _1 has left centre at least once ──
-  // This stops the approach phase from painting a dot at centre.
-  // Once _1 crosses 2.5° in either direction, painting is unlocked
-  // for the rest of the motion — including passes back through centre.
-  const SWEEP_THRESHOLD = 2.5;
+  // ── Gate: block painting until _1 has left its start position ──
+  const SWEEP_THRESHOLD = isEyebrow ? 1.5 : 2.5;
   if (!state._sweepStarted) {
-    if (Math.abs(hAngle) < SWEEP_THRESHOLD) return;
+    const distFromStart = isEyebrow
+      ? Math.abs(Math.abs(hAngle) - 8)
+      : Math.abs(hAngle);
+    if (distFromStart < SWEEP_THRESHOLD) return;
     state._sweepStarted = true;
   }
 
   // ── Map angle to spine position ───────────────────────────────
-  // hRatio: -1 = full right corner, +1 = full left corner
-  const hRatio = Math.max(-1, Math.min(1, hAngle / H_ANGLE_RANGE));
-  // t: 0 = left edge of lip, 1 = right edge
-  const t      = (1 - hRatio) / 2;
+  let t;
+  if (isEyebrow) {
+    if (hAngle >= 0) {
+      t = Math.max(0, Math.min(1, (hAngle - 8) / (26 - 8)));
+    } else {
+      t = Math.max(0, Math.min(1, 1 - (hAngle + 8) / (-26 + 8)));
+    }
+  } else {
+    const hRatio = Math.max(-1, Math.min(1, hAngle / H_ANGLE_RANGE));
+    t = (1 - hRatio) / 2;
+  }
 
-  // Decide upper vs lower lip based on wrist pitch (_4)
-  const half   = wrist4 >= 3 ? 'lower' : 'upper';
-  const spine  = getSpine(region, half);
+  const spine = getSpineForRegion(region, hAngle, wrist4);
   if (spine.length === 0) return;
 
   const pt = sampleSpine(spine, t);
   if (!pt) return;
 
-  // ── Break the stroke when switching lip half ──────────────────
-  // Prevents a connecting line from upper→lower lip transition
-  const lastHalf = state._lastHalf;
-  if (lastHalf && lastHalf !== half) {
-    // Commit current stroke to history and start fresh
-    if (state.currentStroke.length > 1) {
-      state.strokeHistory.push([...state.currentStroke]);
+  // ── Break stroke on lip half transition (lips only) ──────────
+  if (region === 'lips') {
+    const half    = wrist4 >= 3 ? 'lower' : 'upper';
+    const lastHalf = state._lastHalf;
+    if (lastHalf && lastHalf !== half) {
+      if (state.currentStroke.length > 1) {
+        state.strokeHistory.push([...state.currentStroke]);
+      }
+      state.currentStroke = [];
     }
-    state.currentStroke = [];
+    state._lastHalf = half;
   }
-  state._lastHalf = half;
 
   state.currentStroke.push({ ...pt, color });
 

@@ -176,27 +176,167 @@ def _lipstick_plan() -> MotionPlan:
     return MotionPlan(say="Applying lipstick.", actions=actions)
 
 
+# ---------------------------------------------------------------------------
+# Eyebrow motion tuning
+# ---------------------------------------------------------------------------
+# ARM POSITION — eyebrows sit higher than lips, less forward reach
+BROW_LIFT_HEIGHT    = -42.0   # _2: higher than lips (more negative = higher)
+BROW_REACH_FORWARD  =  12.0   # _3: slightly less reach than lips
+BROW_WRIST_ANGLE    =  -5.0   # _4: slight wrist tilt to follow brow arch
+
+# LEFT EYEBROW sweep angles (_1 positive = arm swings left)
+# Brows are offset from centre — left brow is on the positive side
+BROW_L_INNER        =   8.0   # _1: inner corner of left brow
+BROW_L_PEAK         =  18.0   # _1: arch peak of left brow
+BROW_L_OUTER        =  26.0   # _1: outer corner of left brow
+
+# RIGHT EYEBROW sweep angles (_1 negative = arm swings right)
+BROW_R_INNER        =  -8.0   # _1: inner corner of right brow
+BROW_R_PEAK         = -18.0   # _1: arch peak of right brow
+BROW_R_OUTER        = -26.0   # _1: outer corner of right brow
+
+# WRIST arch — _4 dips slightly at the peak to follow the arch curve
+BROW_WRIST_FLAT     =   0.0   # _4 at inner/outer corners
+BROW_WRIST_ARCH     =  -8.0   # _4 at arch peak (dips down = pencil presses in)
+
+# STROKE SPEEDS
+BROW_APPROACH_DUR   =  1.2    # time to lift arm to brow height
+BROW_SWEEP_DUR      =  0.55   # duration per brow segment (inner→peak→outer)
+BROW_PAUSE_DUR      =  0.25   # brief pause at inner corner before stroking
+BROW_REPS           =  2      # number of full brow passes for coverage
+BROW_RETREAT_DUR    =  1.5    # time to return home
+BROW_BETWEEN_DUR    =  0.8    # time to reposition between left and right brow
+
+
+def _brow_actions_one_side(inner: float, peak: float, outer: float) -> list[Action]:
+    """Generate stroke actions for one eyebrow: inner → peak → outer (×BROW_REPS)."""
+    actions: list[Action] = []
+    for _ in range(BROW_REPS):
+        # Inner corner → arch peak (wrist dips to press)
+        actions.append(Action(
+            type="set_pose",
+            pose={"_1": peak, "_4": BROW_WRIST_ARCH},
+            duration=BROW_SWEEP_DUR,
+        ))
+        # Arch peak → outer corner (wrist levels out)
+        actions.append(Action(
+            type="set_pose",
+            pose={"_1": outer, "_4": BROW_WRIST_FLAT},
+            duration=BROW_SWEEP_DUR,
+        ))
+        # Outer → back to inner for next rep (fast return)
+        if _ < BROW_REPS - 1:
+            actions.append(Action(
+                type="set_pose",
+                pose={"_1": inner, "_4": BROW_WRIST_FLAT},
+                duration=BROW_SWEEP_DUR,
+            ))
+    return actions
+
+
+def _left_eyebrow_plan() -> MotionPlan:
+    """Stroke the left eyebrow: inner corner → arch peak → outer corner."""
+    actions: list[Action] = []
+
+    # 1. Approach — lift to brow height, position at inner corner
+    actions.append(Action(
+        type="set_pose",
+        pose={"_1": BROW_L_INNER, "_2": BROW_LIFT_HEIGHT,
+              "_3": BROW_REACH_FORWARD, "_4": BROW_WRIST_FLAT},
+        duration=BROW_APPROACH_DUR,
+    ))
+    actions.append(Action(type="wait", duration=BROW_PAUSE_DUR))
+
+    # 2. Stroke passes
+    actions.extend(_brow_actions_one_side(BROW_L_INNER, BROW_L_PEAK, BROW_L_OUTER))
+
+    # 3. Retreat
+    actions.append(Action(type="home", duration=BROW_RETREAT_DUR))
+    return MotionPlan(say="Drawing left eyebrow.", actions=actions)
+
+
+def _right_eyebrow_plan() -> MotionPlan:
+    """Stroke the right eyebrow: inner corner → arch peak → outer corner."""
+    actions: list[Action] = []
+
+    # 1. Approach — lift to brow height, position at inner corner
+    actions.append(Action(
+        type="set_pose",
+        pose={"_1": BROW_R_INNER, "_2": BROW_LIFT_HEIGHT,
+              "_3": BROW_REACH_FORWARD, "_4": BROW_WRIST_FLAT},
+        duration=BROW_APPROACH_DUR,
+    ))
+    actions.append(Action(type="wait", duration=BROW_PAUSE_DUR))
+
+    # 2. Stroke passes
+    actions.extend(_brow_actions_one_side(BROW_R_INNER, BROW_R_PEAK, BROW_R_OUTER))
+
+    # 3. Retreat
+    actions.append(Action(type="home", duration=BROW_RETREAT_DUR))
+    return MotionPlan(say="Drawing right eyebrow.", actions=actions)
+
+
+def _both_eyebrows_plan() -> MotionPlan:
+    """Stroke both eyebrows: left first, reposition, then right."""
+    actions: list[Action] = []
+
+    # 1. Approach left brow
+    actions.append(Action(
+        type="set_pose",
+        pose={"_1": BROW_L_INNER, "_2": BROW_LIFT_HEIGHT,
+              "_3": BROW_REACH_FORWARD, "_4": BROW_WRIST_FLAT},
+        duration=BROW_APPROACH_DUR,
+    ))
+    actions.append(Action(type="wait", duration=BROW_PAUSE_DUR))
+
+    # 2. Left brow strokes
+    actions.extend(_brow_actions_one_side(BROW_L_INNER, BROW_L_PEAK, BROW_L_OUTER))
+
+    # 3. Reposition to right brow inner corner (stay at same height)
+    actions.append(Action(
+        type="set_pose",
+        pose={"_1": BROW_R_INNER, "_4": BROW_WRIST_FLAT},
+        duration=BROW_BETWEEN_DUR,
+    ))
+    actions.append(Action(type="wait", duration=BROW_PAUSE_DUR))
+
+    # 4. Right brow strokes
+    actions.extend(_brow_actions_one_side(BROW_R_INNER, BROW_R_PEAK, BROW_R_OUTER))
+
+    # 5. Retreat
+    actions.append(Action(type="home", duration=BROW_RETREAT_DUR))
+    return MotionPlan(say="Drawing both eyebrows.", actions=actions)
+
+
 # Registry — add new actions here as the project grows
 MAKEUP_ACTIONS: dict[str, dict[str, Any]] = {
     "lipstick": {
-        "plan":    _lipstick_plan,   # callable so each call gets a fresh plan
-        "region":  "lips",
-        "joints":  {"horizontal": "_1", "vertical": "_2"},
-        "label":   "Lipstick",
+        "plan":   _lipstick_plan,
+        "region": "lips",
+        "joints": {"horizontal": "_1", "vertical": "_2"},
+        "label":  "Lipstick",
     },
-    # Future actions — uncomment and implement when ready:
-    # "eyeliner": {
-    #     "plan":   _eyeliner_plan,
-    #     "region": "left_eye",
-    #     "joints": {"horizontal": "_1", "vertical": "_2"},
-    #     "label":  "Eyeliner",
-    # },
-    # "blush": {
-    #     "plan":   _blush_plan,
-    #     "region": "left_cheek",
-    #     "joints": {"horizontal": "_1", "vertical": "_2"},
-    #     "label":  "Blush",
-    # },
+    "left_eyebrow": {
+        "plan":   _left_eyebrow_plan,
+        "region": "left_eyebrow",
+        "joints": {"horizontal": "_1", "vertical": "_2"},
+        "label":  "Left Brow",
+    },
+    "right_eyebrow": {
+        "plan":   _right_eyebrow_plan,
+        "region": "right_eyebrow",
+        "joints": {"horizontal": "_1", "vertical": "_2"},
+        "label":  "Right Brow",
+    },
+    "both_eyebrows": {
+        "plan":   _both_eyebrows_plan,
+        "region": "both_eyebrows",
+        "joints": {"horizontal": "_1", "vertical": "_2"},
+        "label":  "Both Brows",
+    },
+    # Future actions:
+    # "eyeliner": { "plan": _eyeliner_plan, "region": "left_eye", ... },
+    # "blush":    { "plan": _blush_plan,    "region": "left_cheek", ... },
 }
 
 
