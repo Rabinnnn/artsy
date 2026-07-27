@@ -512,10 +512,13 @@ function handleMessage(msg) {
       break;
 
     case 'motion_start':
-      state.running      = true;
-      state.motionRegion = msg.region;
-      state.motionJoints = msg.joints;
-      state.currentStroke = [];
+      state.running           = true;
+      state.motionRegion      = msg.region;
+      state.motionJoints      = msg.joints;
+      state.currentStroke     = [];
+      state.currentActionType = null;
+      state._lastHalf         = null;
+      state._sweepStarted     = false;
       statusPill.textContent = 'running';
       statusPill.className   = 'status-pill running';
       progressBar.classList.add('visible');
@@ -531,6 +534,16 @@ function handleMessage(msg) {
       break;
 
     case 'action_start':
+      state.currentActionType = msg.action_type;
+      // Reset sweep gate on every new action phase so approach, blot,
+      // and retreat each start gated — painting only unlocks once _1 moves
+      state._sweepStarted = false;
+      // Break the running stroke on every new action so phases don't bleed
+      if (state.currentStroke.length > 1) {
+        state.strokeHistory.push([...state.currentStroke]);
+      }
+      state.currentStroke = [];
+      state._lastHalf     = null;
       const pct = ((msg.step - 1) / msg.total) * 100;
       progressFill.style.width = pct + '%';
       break;
@@ -755,7 +768,7 @@ const V_ANGLE_RANGE = 35;   // _2 vertical sensitivity
 
 // Brush settings per region — add new regions here as actions are added
 const BRUSH = {
-  lips:      { width: 16,  alpha: 0.52, blend: 'multiply' },
+  lips:      { width: 12,  alpha: 0.52, blend: 'multiply' },
   left_eye:  { width: 2,  alpha: 0.80, blend: 'multiply' },
   right_eye: { width: 2,  alpha: 0.80, blend: 'multiply' },
   left_cheek:{ width: 18, alpha: 0.22, blend: 'multiply' },
@@ -811,41 +824,61 @@ function clearSpineCache() { _spineCache = {}; }
 function drawStrokeFromJoints(joints, color, action) {
   const region  = state.motionRegion || 'lips';
   const hJoint  = (state.motionJoints && state.motionJoints.horizontal) || '_1';
-  const wrist4  = joints['_4'] || 0;  // wrist pitch — positive = lower lip
-
+  const wrist4  = joints['_4'] || 0;
   const hAngle  = joints[hJoint] || 0;
 
+  // ── Gate: block painting until _1 has left centre at least once ──
+  // This stops the approach phase from painting a dot at centre.
+  // Once _1 crosses 2.5° in either direction, painting is unlocked
+  // for the rest of the motion — including passes back through centre.
+  const SWEEP_THRESHOLD = 2.5;
+  if (!state._sweepStarted) {
+    if (Math.abs(hAngle) < SWEEP_THRESHOLD) return;
+    state._sweepStarted = true;
+  }
+
+  // ── Map angle to spine position ───────────────────────────────
   // hRatio: -1 = full right corner, +1 = full left corner
-  // (positive _1 = arm swings left = right side of face from viewer)
-  const hRatio  = Math.max(-1, Math.min(1, hAngle / H_ANGLE_RANGE));
-  // Convert to t: 0 = left edge of lip, 1 = right edge
-  const t       = (1 - hRatio) / 2;
+  const hRatio = Math.max(-1, Math.min(1, hAngle / H_ANGLE_RANGE));
+  // t: 0 = left edge of lip, 1 = right edge
+  const t      = (1 - hRatio) / 2;
 
   // Decide upper vs lower lip based on wrist pitch (_4)
-  // Negative _4 = wrist dips down = upper lip; positive = lower lip
-  const half    = wrist4 >= 3 ? 'lower' : 'upper';
-  const spine   = getSpine(region, half);
+  const half   = wrist4 >= 3 ? 'lower' : 'upper';
+  const spine  = getSpine(region, half);
   if (spine.length === 0) return;
 
   const pt = sampleSpine(spine, t);
   if (!pt) return;
+
+  // ── Break the stroke when switching lip half ──────────────────
+  // Prevents a connecting line from upper→lower lip transition
+  const lastHalf = state._lastHalf;
+  if (lastHalf && lastHalf !== half) {
+    // Commit current stroke to history and start fresh
+    if (state.currentStroke.length > 1) {
+      state.strokeHistory.push([...state.currentStroke]);
+    }
+    state.currentStroke = [];
+  }
+  state._lastHalf = half;
 
   state.currentStroke.push({ ...pt, color });
 
   const pts = state.currentStroke;
   if (pts.length < 2) return;
 
-  const prev   = pts[pts.length - 2];
-  const curr   = pts[pts.length - 1];
-  const brush  = BRUSH[region] || BRUSH._default;
+  const prev  = pts[pts.length - 2];
+  const curr  = pts[pts.length - 1];
+  const brush = BRUSH[region] || BRUSH._default;
 
   drawCtx.save();
-  drawCtx.globalAlpha               = brush.alpha;
-  drawCtx.globalCompositeOperation  = brush.blend;
-  drawCtx.strokeStyle               = color;
-  drawCtx.lineWidth                 = brush.width;
-  drawCtx.lineCap                   = 'round';
-  drawCtx.lineJoin                  = 'round';
+  drawCtx.globalAlpha              = brush.alpha;
+  drawCtx.globalCompositeOperation = brush.blend;
+  drawCtx.strokeStyle              = color;
+  drawCtx.lineWidth                = brush.width;
+  drawCtx.lineCap                  = 'round';
+  drawCtx.lineJoin                 = 'round';
   drawCtx.beginPath();
   drawCtx.moveTo(prev.x, prev.y);
   drawCtx.lineTo(curr.x, curr.y);
