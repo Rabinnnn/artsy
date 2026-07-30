@@ -341,6 +341,9 @@
     <!-- Undo -->
     <button class="undo-btn" id="undoBtn">↩ Undo last stroke</button>
 
+    <!-- Test brow -->
+    <button class="undo-btn" id="testBrowBtn" style="margin-top:4px">🧪 Test Brow Fill</button>
+
     <!-- Log -->
     <div>
       <div class="section-label">Activity</div>
@@ -418,20 +421,20 @@ const REGION_LANDMARKS = {
     verticalJoint:   '_2',
   },
   left_eyebrow: {
-    // Left eyebrow — ordered inner corner → arch → outer corner (left→right)
+    // MediaPipe left eyebrow — single row, inner → outer
     outer: [46, 53, 52, 65, 55, 107, 66, 105, 63, 70],
     inner: [46, 53, 52, 65, 55, 107, 66, 105, 63, 70],
     horizontalJoint: '_1',
     verticalJoint:   '_2',
-    ordered: true,   // already in sweep order — skip x-sort
+    ordered: true,
   },
   right_eyebrow: {
-    // Right eyebrow — ordered inner corner → arch → outer corner (right→left, mirrored)
+    // MediaPipe right eyebrow — single row, inner → outer
     outer: [276, 283, 282, 295, 285, 336, 296, 334, 293, 300],
     inner: [276, 283, 282, 295, 285, 336, 296, 334, 293, 300],
     horizontalJoint: '_1',
     verticalJoint:   '_2',
-    ordered: true,   // already in sweep order — skip x-sort
+    ordered: true,
   },
   both_eyebrows: {
     outer: [46, 53, 52, 65, 55, 107, 66, 105, 63, 70,
@@ -534,30 +537,53 @@ function handleMessage(msg) {
       state.running           = true;
       state.motionRegion      = msg.region;
       state.motionJoints      = msg.joints;
+      state.motionColor       = msg.color;
       state.currentStroke     = [];
       state.currentActionType = null;
       state._lastHalf         = null;
       state._sweepStarted     = false;
+      state._browPhase        = null;
+      state._browPass         = null;
+      state._browTotal        = 1;
+      state._browArchDrawn    = false;
+      state._browSide         = 'left';
+      state._browOnRightSide  = false;
       statusPill.textContent = 'running';
       statusPill.className   = 'status-pill running';
       progressBar.classList.add('visible');
       progressFill.style.width = '0%';
       applyBtn.disabled = true;
       log(`▶ Starting ${msg.action}…`, 'info');
+
+      // For eyebrow actions: fill the brow shape immediately with hair strokes
+      if (msg.region && msg.region.includes('eyebrow') && state.imageLoaded && state.landmarks) {
+        if (msg.region === 'both_eyebrows') {
+          fillBrowWithStrokes('left_eyebrow',  msg.color);
+          fillBrowWithStrokes('right_eyebrow', msg.color);
+        } else {
+          fillBrowWithStrokes(msg.region, msg.color);
+        }
+      }
       break;
 
     case 'joint_update':
+      console.log('[joint_update] region:', state.motionRegion, 'browPhase:', state._browPhase, 'joints:', JSON.stringify(msg.joints));
       if (state.imageLoaded && state.landmarks && state.running) {
         drawStrokeFromJoints(msg.joints, msg.color, msg.action);
       }
       break;
 
-    case 'action_start':
+    case 'action_start': {
       state.currentActionType = msg.action_type;
-      // Reset sweep gate on every new action phase so approach, blot,
-      // and retreat each start gated — painting only unlocks once _1 moves
-      state._sweepStarted = false;
-      // Break the running stroke on every new action so phases don't bleed
+      state._browPhase        = msg.brow_phase  || null;
+      state._browPass         = msg.brow_pass   ?? null;
+      state._browTotal        = msg.brow_total  || 1;
+      // Only reset sweep gate on non-sweep phases (approach, return, retreat)
+      // During sweep phases keep it open so joint_update draws immediately
+      if (msg.brow_phase !== 'sweep') {
+        state._sweepStarted = false;
+      }
+      state._browArchDrawn    = false;
       if (state.currentStroke.length > 1) {
         state.strokeHistory.push([...state.currentStroke]);
       }
@@ -565,7 +591,11 @@ function handleMessage(msg) {
       state._lastHalf     = null;
       const pct = ((msg.step - 1) / msg.total) * 100;
       progressFill.style.width = pct + '%';
+      if (msg.brow_phase === 'reposition') {
+        state._browOnRightSide = true;
+      }
       break;
+    }
 
     case 'say':
       log(`💬 ${msg.text}`, 'info');
@@ -686,6 +716,7 @@ function loadImage(file) {
       state.imageLoaded = true;
       state.strokeHistory = [];
       clearSpineCache();
+      clearBrowSpineCache();
       drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
 
       log('Image loaded. Detecting face landmarks…', 'info');
@@ -864,74 +895,170 @@ function getSpine(region, half) {
 // Clear spine cache when a new image is loaded
 function clearSpineCache() { _spineCache = {}; }
 
+// ── Eyebrow drawing constants (tune these) ───────────────────────
+const BROW_STROKE_PASSES = 3;    // repetitions for thickness
+const BROW_STROKE_WIDTH  = 4;    // thickness of the brow line
+const BROW_STROKE_ALPHA  = 0.50; // opacity per pass
+const BROW_V_SPREAD      = 1.5;  // vertical spread between passes
+const BROW_Y_OFFSET      = -3;   // shift up (negative) or down (positive)
+
+function fillBrowWithStrokes(browRegion, color) {
+  if (!state.landmarks) return;
+  const def = REGION_LANDMARKS[browRegion];
+  if (!def) return;
+
+  // Get all brow points and sort by X
+  const pts = def.outer.map(i => ({
+    x: state.landmarks[i].x * drawCanvas.width,
+    y: state.landmarks[i].y * drawCanvas.height,
+  })).sort((a, b) => a.x - b.x);
+  if (pts.length < 2) return;
+
+  // Compute a single midpoint line: for each point use its own Y
+  // but smooth it by averaging with neighbours
+  const smoothed = pts.map((p, i) => {
+    const neighbors = pts.slice(Math.max(0, i-2), Math.min(pts.length, i+3));
+    const avgY = neighbors.reduce((s, n) => s + n.y, 0) / neighbors.length;
+    return { x: p.x, y: avgY };
+  });
+
+  const half = Math.floor(BROW_STROKE_PASSES / 2);
+  for (let pass = -half; pass <= half; pass++) {
+    const yOff = pass * BROW_V_SPREAD + BROW_Y_OFFSET;
+    drawCtx.save();
+    drawCtx.globalAlpha              = BROW_STROKE_ALPHA;
+    drawCtx.globalCompositeOperation = 'source-over';
+    drawCtx.strokeStyle              = color;
+    drawCtx.lineWidth                = BROW_STROKE_WIDTH;
+    drawCtx.lineCap                  = 'round';
+    drawCtx.lineJoin                 = 'round';
+    drawCtx.beginPath();
+    drawCtx.moveTo(smoothed[0].x, smoothed[0].y + yOff);
+    for (let i = 1; i < smoothed.length; i++) {
+      // Use quadratic curves for smoother arch
+      const mx = (smoothed[i-1].x + smoothed[i].x) / 2;
+      const my = (smoothed[i-1].y + smoothed[i].y) / 2;
+      drawCtx.quadraticCurveTo(smoothed[i-1].x, smoothed[i-1].y + yOff, mx, my + yOff);
+    }
+    drawCtx.lineTo(smoothed[smoothed.length-1].x, smoothed[smoothed.length-1].y + yOff);
+    drawCtx.stroke();
+    drawCtx.restore();
+  }
+
+  state.strokeHistory.push([{ _browFill: true, browRegion, color }]);
+}
+
+// Test button — draws brow fill directly without needing the robot
+document.getElementById('testBrowBtn').addEventListener('click', () => {
+  if (!state.landmarks) { log('Upload a face image first', 'err'); return; }
+  fillBrowWithStrokes('left_eyebrow',  state.selectedColor);
+  fillBrowWithStrokes('right_eyebrow', state.selectedColor);
+  log('Test brow fill drawn.', 'ok');
+});
+
+// Build a smoothed brow spine for progressive drawing
+// Returns points sorted left→right with Y averaged across neighbours
+function buildSmoothedBrowSpine(browRegion) {
+  if (!state.landmarks) return [];
+  const def = REGION_LANDMARKS[browRegion];
+  if (!def) return [];
+  const pts = def.outer.map(i => ({
+    x: state.landmarks[i].x * drawCanvas.width,
+    y: state.landmarks[i].y * drawCanvas.height,
+  })).sort((a, b) => a.x - b.x);
+  // Smooth Y by averaging neighbours — removes zigzag
+  return pts.map((p, i) => {
+    const nb = pts.slice(Math.max(0, i-2), Math.min(pts.length, i+3));
+    return { x: p.x, y: nb.reduce((s, n) => s + n.y, 0) / nb.length + BROW_Y_OFFSET };
+  });
+}
+
+let _browSpineCache = {};
+function getSmoothedBrowSpine(browRegion) {
+  if (!_browSpineCache[browRegion]) {
+    _browSpineCache[browRegion] = buildSmoothedBrowSpine(browRegion);
+  }
+  return _browSpineCache[browRegion];
+}
+
+function clearBrowSpineCache() { _browSpineCache = {}; }
+
 function drawStrokeFromJoints(joints, color, action) {
   const region    = state.motionRegion || 'lips';
   const hJoint    = (state.motionJoints && state.motionJoints.horizontal) || '_1';
   const wrist4    = joints['_4'] || 0;
   const hAngle    = joints[hJoint] || 0;
   const isEyebrow = region.includes('eyebrow');
+  const brush     = BRUSH[region] || BRUSH._default;
 
-  // ── Gate: block painting until _1 has left its start position ──
-  const SWEEP_THRESHOLD = isEyebrow ? 1.5 : 2.5;
+  // ── Gate ─────────────────────────────────────────────────────
   if (!state._sweepStarted) {
-    const distFromStart = isEyebrow
-      ? Math.abs(Math.abs(hAngle) - 8)
-      : Math.abs(hAngle);
-    if (distFromStart < SWEEP_THRESHOLD) return;
-    state._sweepStarted = true;
-  }
-
-  // ── Map angle to spine position ───────────────────────────────
-  let t;
-  if (isEyebrow) {
-    if (hAngle >= 0) {
-      t = Math.max(0, Math.min(1, (hAngle - 8) / (26 - 8)));
+    if (isEyebrow) {
+      // For brows: only block during approach (brow_phase !== 'sweep')
+      if (state._browPhase !== 'sweep') return;
+      state._sweepStarted = true;
     } else {
-      t = Math.max(0, Math.min(1, 1 - (hAngle + 8) / (-26 + 8)));
+      if (Math.abs(hAngle) < 2.5) return;
+      state._sweepStarted = true;
     }
-  } else {
-    const hRatio = Math.max(-1, Math.min(1, hAngle / H_ANGLE_RANGE));
-    t = (1 - hRatio) / 2;
   }
 
-  const spine = getSpineForRegion(region, hAngle, wrist4);
-  if (spine.length === 0) return;
+  // ── Get canvas point from joint angle ────────────────────────
+  let pt;
 
-  const pt = sampleSpine(spine, t);
-  if (!pt) return;
+  if (isEyebrow) {
+    const browRegion = region === 'both_eyebrows'
+      ? (hAngle >= 0 ? 'left_eyebrow' : 'right_eyebrow')
+      : region;
+    const spine = getSmoothedBrowSpine(browRegion);
+    if (spine.length < 2) return;
+    const inner = hAngle >= 0 ? 8  : -8;
+    const outer = hAngle >= 0 ? 26 : -26;
+    const t = Math.max(0, Math.min(1, (hAngle - inner) / (outer - inner)));
+    pt = sampleSpine(spine, hAngle >= 0 ? t : 1 - t);
 
-  // ── Break stroke on lip half transition (lips only) ──────────
-  if (region === 'lips') {
-    const half    = wrist4 >= 3 ? 'lower' : 'upper';
-    const lastHalf = state._lastHalf;
-    if (lastHalf && lastHalf !== half) {
-      if (state.currentStroke.length > 1) {
-        state.strokeHistory.push([...state.currentStroke]);
-      }
+  } else {
+    // Lips
+    const half = wrist4 >= 3 ? 'lower' : 'upper';
+    if (state._lastHalf && state._lastHalf !== half) {
+      if (state.currentStroke.length > 1) state.strokeHistory.push([...state.currentStroke]);
       state.currentStroke = [];
     }
     state._lastHalf = half;
+    const spine = getSpine(region, half);
+    if (spine.length === 0) return;
+    const hRatio = Math.max(-1, Math.min(1, hAngle / H_ANGLE_RANGE));
+    pt = sampleSpine(spine, (1 - hRatio) / 2);
   }
 
-  state.currentStroke.push({ ...pt, color });
+  if (!pt) return;
 
+  state.currentStroke.push({ ...pt, color, wrist4 });
   const pts = state.currentStroke;
   if (pts.length < 2) return;
 
-  const prev  = pts[pts.length - 2];
-  const curr  = pts[pts.length - 1];
-  const brush = BRUSH[region] || BRUSH._default;
+  const prev = pts[pts.length - 2];
+  const curr = pts[pts.length - 1];
 
   drawCtx.save();
-  drawCtx.globalAlpha              = brush.alpha;
-  drawCtx.globalCompositeOperation = brush.blend;
+  drawCtx.globalAlpha              = isEyebrow ? BROW_STROKE_ALPHA : brush.alpha;
+  drawCtx.globalCompositeOperation = 'source-over';
   drawCtx.strokeStyle              = color;
-  drawCtx.lineWidth                = brush.width;
+  drawCtx.lineWidth                = isEyebrow ? BROW_STROKE_WIDTH : brush.width;
   drawCtx.lineCap                  = 'round';
   drawCtx.lineJoin                 = 'round';
   drawCtx.beginPath();
-  drawCtx.moveTo(prev.x, prev.y);
-  drawCtx.lineTo(curr.x, curr.y);
+  if (pts.length >= 3 && isEyebrow) {
+    // Use quadratic curve through midpoint for smooth brow stroke
+    const p0 = pts[pts.length - 3];
+    const mx = (p0.x + curr.x) / 2;
+    const my = (p0.y + curr.y) / 2;
+    drawCtx.moveTo(p0.x, p0.y);
+    drawCtx.quadraticCurveTo(prev.x, prev.y, mx, my);
+  } else {
+    drawCtx.moveTo(prev.x, prev.y);
+    drawCtx.lineTo(curr.x, curr.y);
+  }
   drawCtx.stroke();
   drawCtx.restore();
 }
@@ -950,19 +1077,29 @@ undoBtn.addEventListener('click', () => {
 
 function redrawAllStrokes() {
   drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-  const region = state.motionRegion || 'lips';
-  const brush  = BRUSH[region] || BRUSH._default;
   state.strokeHistory.forEach(stroke => {
+    if (!stroke || stroke.length === 0) return;
+
+    // Eyebrow fill entry
+    if (stroke[0]._browFill) {
+      fillBrowWithStrokes(stroke[0].browRegion, stroke[0].color);
+      return;
+    }
+
+    // Lip/other continuous strokes
+    if (stroke.length < 2) return;
+    const region = state.motionRegion || 'lips';
+    const brush  = BRUSH[region] || BRUSH._default;
     for (let i = 1; i < stroke.length; i++) {
       const prev = stroke[i-1];
       const curr = stroke[i];
       drawCtx.save();
-      drawCtx.globalAlpha               = brush.alpha;
-      drawCtx.globalCompositeOperation  = brush.blend;
-      drawCtx.strokeStyle               = curr.color;
-      drawCtx.lineWidth                 = brush.width;
-      drawCtx.lineCap                   = 'round';
-      drawCtx.lineJoin                  = 'round';
+      drawCtx.globalAlpha              = brush.alpha;
+      drawCtx.globalCompositeOperation = brush.blend;
+      drawCtx.strokeStyle              = curr.color;
+      drawCtx.lineWidth                = brush.width;
+      drawCtx.lineCap                  = 'round';
+      drawCtx.lineJoin                 = 'round';
       drawCtx.beginPath();
       drawCtx.moveTo(prev.x, prev.y);
       drawCtx.lineTo(curr.x, curr.y);

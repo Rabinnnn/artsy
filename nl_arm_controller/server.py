@@ -179,133 +179,145 @@ def _lipstick_plan() -> MotionPlan:
 # ---------------------------------------------------------------------------
 # Eyebrow motion tuning
 # ---------------------------------------------------------------------------
-# ARM POSITION — eyebrows sit higher than lips, less forward reach
-BROW_LIFT_HEIGHT    = -42.0   # _2: higher than lips (more negative = higher)
-BROW_REACH_FORWARD  =  12.0   # _3: slightly less reach than lips
-BROW_WRIST_ANGLE    =  -5.0   # _4: slight wrist tilt to follow brow arch
+# ARM POSITION
+BROW_LIFT_HEIGHT    = -42.0   # _2: shoulder height at brow level
+BROW_REACH_FORWARD  =  12.0   # _3: elbow extension toward face
 
-# LEFT EYEBROW sweep angles (_1 positive = arm swings left)
-# Brows are offset from centre — left brow is on the positive side
-BROW_L_INNER        =   8.0   # _1: inner corner of left brow
-BROW_L_PEAK         =  18.0   # _1: arch peak of left brow
-BROW_L_OUTER        =  26.0   # _1: outer corner of left brow
+# STROKE POSITIONS — _1 angle for each brow's inner/outer boundary
+BROW_L_INNER        =   8.0   # left brow inner corner
+BROW_L_OUTER        =  26.0   # left brow outer corner
+BROW_R_INNER        =  -8.0   # right brow inner corner
+BROW_R_OUTER        = -26.0   # right brow outer corner
 
-# RIGHT EYEBROW sweep angles (_1 negative = arm swings right)
-BROW_R_INNER        =  -8.0   # _1: inner corner of right brow
-BROW_R_PEAK         = -18.0   # _1: arch peak of right brow
-BROW_R_OUTER        = -26.0   # _1: outer corner of right brow
+# LATERAL PASS tuning
+# Each pass is one continuous inner→outer sweep at a slightly different height.
+# Passes stack vertically to build up the layered hair texture of the brow.
+BROW_PASS_COUNT     =   5     # number of lateral passes per brow
+                               # more passes = fuller/denser brow
+BROW_PASS_DUR       =  0.55   # duration of each inner→outer sweep
+BROW_RETURN_DUR     =  0.30   # duration of outer→inner return between passes
+BROW_V_STEP         =   1.5   # _2 shift per pass (degrees) — each pass sits
+                               # slightly higher, building the brow shape
+                               # positive = passes move upward on the brow
+BROW_WRIST_INNER    =  -3.0   # _4 at inner corner (wrist angled for brow base)
+BROW_WRIST_OUTER    =   4.0   # _4 at outer corner (follows brow tail angle)
 
-# WRIST arch — _4 dips slightly at the peak to follow the arch curve
-BROW_WRIST_FLAT     =   0.0   # _4 at inner/outer corners
-BROW_WRIST_ARCH     =  -8.0   # _4 at arch peak (dips down = pencil presses in)
-
-# STROKE SPEEDS
+# GENERAL TIMING
 BROW_APPROACH_DUR   =  1.2    # time to lift arm to brow height
-BROW_SWEEP_DUR      =  0.55   # duration per brow segment (inner→peak→outer)
-BROW_PAUSE_DUR      =  0.25   # brief pause at inner corner before stroking
-BROW_REPS           =  2      # number of full brow passes for coverage
+BROW_PAUSE_DUR      =  0.2    # pause at start before stroking
 BROW_RETREAT_DUR    =  1.5    # time to return home
-BROW_BETWEEN_DUR    =  0.8    # time to reposition between left and right brow
+BROW_BETWEEN_DUR    =  0.9    # reposition time between left and right brow
 
 
-def _brow_actions_one_side(inner: float, peak: float, outer: float) -> list[Action]:
-    """Generate stroke actions for one eyebrow: inner → peak → outer (×BROW_REPS)."""
-    actions: list[Action] = []
-    for _ in range(BROW_REPS):
-        # Inner corner → arch peak (wrist dips to press)
-        actions.append(Action(
-            type="set_pose",
-            pose={"_1": peak, "_4": BROW_WRIST_ARCH},
-            duration=BROW_SWEEP_DUR,
-        ))
-        # Arch peak → outer corner (wrist levels out)
-        actions.append(Action(
-            type="set_pose",
-            pose={"_1": outer, "_4": BROW_WRIST_FLAT},
-            duration=BROW_SWEEP_DUR,
-        ))
-        # Outer → back to inner for next rep (fast return)
-        if _ < BROW_REPS - 1:
-            actions.append(Action(
+def _brow_passes_one_side(
+    inner: float, outer: float, lift_base: float
+) -> list[tuple[Action, dict]]:
+    """Generate BROW_PASS_COUNT lateral passes across one eyebrow.
+    Returns list of (Action, metadata) tuples so the browser knows
+    which pass is a sweep vs a return.
+    """
+    result: list[tuple[Action, dict]] = []
+
+    for i in range(BROW_PASS_COUNT):
+        v_offset = i * BROW_V_STEP
+
+        # Sweep: inner → outer (paint this)
+        result.append((
+            Action(
                 type="set_pose",
-                pose={"_1": inner, "_4": BROW_WRIST_FLAT},
-                duration=BROW_SWEEP_DUR,
+                pose={"_1": outer, "_2": lift_base + v_offset, "_4": BROW_WRIST_OUTER},
+                duration=BROW_PASS_DUR,
+            ),
+            {"brow_phase": "sweep", "brow_pass": i, "brow_total": BROW_PASS_COUNT},
+        ))
+
+        # Return: outer → inner (skip painting)
+        if i < BROW_PASS_COUNT - 1:
+            result.append((
+                Action(
+                    type="set_pose",
+                    pose={"_1": inner, "_2": lift_base + v_offset, "_4": BROW_WRIST_INNER},
+                    duration=BROW_RETURN_DUR,
+                ),
+                {"brow_phase": "return", "brow_pass": i, "brow_total": BROW_PASS_COUNT},
             ))
-    return actions
+
+    return result
+
+
+def _build_brow_plan(
+    say: str,
+    sides: list[tuple[float, float]],   # [(inner, outer), ...]
+) -> MotionPlan:
+    """Build a brow plan with phase metadata attached as action tags."""
+    tagged: list[tuple[Action, dict]] = []
+
+    for side_idx, (inner, outer) in enumerate(sides):
+        # Approach
+        tagged.append((
+            Action(
+                type="set_pose",
+                pose={"_1": inner, "_2": BROW_LIFT_HEIGHT,
+                      "_3": BROW_REACH_FORWARD, "_4": BROW_WRIST_INNER},
+                duration=BROW_APPROACH_DUR,
+            ),
+            {"brow_phase": "approach"},
+        ))
+        tagged.append((
+            Action(type="wait", duration=BROW_PAUSE_DUR),
+            {"brow_phase": "approach"},
+        ))
+
+        # Passes
+        tagged.extend(_brow_passes_one_side(inner, outer, BROW_LIFT_HEIGHT))
+
+        # Between sides reposition (if more sides follow)
+        if side_idx < len(sides) - 1:
+            next_inner = sides[side_idx + 1][0]
+            tagged.append((
+                Action(
+                    type="set_pose",
+                    pose={"_1": next_inner, "_2": BROW_LIFT_HEIGHT, "_4": BROW_WRIST_INNER},
+                    duration=BROW_BETWEEN_DUR,
+                ),
+                {"brow_phase": "reposition"},
+            ))
+            tagged.append((
+                Action(type="wait", duration=BROW_PAUSE_DUR),
+                {"brow_phase": "reposition"},
+            ))
+
+    # Retreat
+    tagged.append((
+        Action(type="home", duration=BROW_RETREAT_DUR),
+        {"brow_phase": "retreat"},
+    ))
+
+    # Store metadata on plan so StreamingExecutor can forward it
+    plan = MotionPlan(say=say, actions=[a for a, _ in tagged])
+    plan._action_meta = [m for _, m in tagged]   # type: ignore[attr-defined]
+    return plan
 
 
 def _left_eyebrow_plan() -> MotionPlan:
-    """Stroke the left eyebrow: inner corner → arch peak → outer corner."""
-    actions: list[Action] = []
-
-    # 1. Approach — lift to brow height, position at inner corner
-    actions.append(Action(
-        type="set_pose",
-        pose={"_1": BROW_L_INNER, "_2": BROW_LIFT_HEIGHT,
-              "_3": BROW_REACH_FORWARD, "_4": BROW_WRIST_FLAT},
-        duration=BROW_APPROACH_DUR,
-    ))
-    actions.append(Action(type="wait", duration=BROW_PAUSE_DUR))
-
-    # 2. Stroke passes
-    actions.extend(_brow_actions_one_side(BROW_L_INNER, BROW_L_PEAK, BROW_L_OUTER))
-
-    # 3. Retreat
-    actions.append(Action(type="home", duration=BROW_RETREAT_DUR))
-    return MotionPlan(say="Drawing left eyebrow.", actions=actions)
+    return _build_brow_plan(
+        "Drawing left eyebrow.",
+        [(BROW_L_INNER, BROW_L_OUTER)],
+    )
 
 
 def _right_eyebrow_plan() -> MotionPlan:
-    """Stroke the right eyebrow: inner corner → arch peak → outer corner."""
-    actions: list[Action] = []
-
-    # 1. Approach — lift to brow height, position at inner corner
-    actions.append(Action(
-        type="set_pose",
-        pose={"_1": BROW_R_INNER, "_2": BROW_LIFT_HEIGHT,
-              "_3": BROW_REACH_FORWARD, "_4": BROW_WRIST_FLAT},
-        duration=BROW_APPROACH_DUR,
-    ))
-    actions.append(Action(type="wait", duration=BROW_PAUSE_DUR))
-
-    # 2. Stroke passes
-    actions.extend(_brow_actions_one_side(BROW_R_INNER, BROW_R_PEAK, BROW_R_OUTER))
-
-    # 3. Retreat
-    actions.append(Action(type="home", duration=BROW_RETREAT_DUR))
-    return MotionPlan(say="Drawing right eyebrow.", actions=actions)
+    return _build_brow_plan(
+        "Drawing right eyebrow.",
+        [(BROW_R_INNER, BROW_R_OUTER)],
+    )
 
 
 def _both_eyebrows_plan() -> MotionPlan:
-    """Stroke both eyebrows: left first, reposition, then right."""
-    actions: list[Action] = []
-
-    # 1. Approach left brow
-    actions.append(Action(
-        type="set_pose",
-        pose={"_1": BROW_L_INNER, "_2": BROW_LIFT_HEIGHT,
-              "_3": BROW_REACH_FORWARD, "_4": BROW_WRIST_FLAT},
-        duration=BROW_APPROACH_DUR,
-    ))
-    actions.append(Action(type="wait", duration=BROW_PAUSE_DUR))
-
-    # 2. Left brow strokes
-    actions.extend(_brow_actions_one_side(BROW_L_INNER, BROW_L_PEAK, BROW_L_OUTER))
-
-    # 3. Reposition to right brow inner corner (stay at same height)
-    actions.append(Action(
-        type="set_pose",
-        pose={"_1": BROW_R_INNER, "_4": BROW_WRIST_FLAT},
-        duration=BROW_BETWEEN_DUR,
-    ))
-    actions.append(Action(type="wait", duration=BROW_PAUSE_DUR))
-
-    # 4. Right brow strokes
-    actions.extend(_brow_actions_one_side(BROW_R_INNER, BROW_R_PEAK, BROW_R_OUTER))
-
-    # 5. Retreat
-    actions.append(Action(type="home", duration=BROW_RETREAT_DUR))
-    return MotionPlan(say="Drawing both eyebrows.", actions=actions)
+    return _build_brow_plan(
+        "Drawing both eyebrows.",
+        [(BROW_L_INNER, BROW_L_OUTER), (BROW_R_INNER, BROW_R_OUTER)],
+    )
 
 
 # Registry — add new actions here as the project grows
@@ -378,13 +390,19 @@ class StreamingExecutor:
         if plan.say:
             await self._ws.send(json.dumps({"type": "say", "text": plan.say}))
 
+        meta_list = getattr(plan, '_action_meta', [{}] * len(plan.actions))
+
         for i, action in enumerate(plan.actions, 1):
-            await self._ws.send(json.dumps({
-                "type": "action_start",
-                "step": i,
-                "total": len(plan.actions),
+            meta = meta_list[i - 1] if i - 1 < len(meta_list) else {}
+            msg = {
+                "type":        "action_start",
+                "step":        i,
+                "total":       len(plan.actions),
                 "action_type": action.type,
-            }))
+                "color":       self._color,
+            }
+            msg.update(meta)
+            await self._ws.send(json.dumps(msg))
             await self._run_action_streaming(action)
 
         await self._ws.send(json.dumps({"type": "done"}))
