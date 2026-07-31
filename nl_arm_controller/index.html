@@ -548,28 +548,25 @@ function handleMessage(msg) {
       state._browArchDrawn    = false;
       state._browSide         = 'left';
       state._browOnRightSide  = false;
+      state._browPassDrawn    = false;
       statusPill.textContent = 'running';
       statusPill.className   = 'status-pill running';
       progressBar.classList.add('visible');
       progressFill.style.width = '0%';
       applyBtn.disabled = true;
       log(`▶ Starting ${msg.action}…`, 'info');
-
-      // For eyebrow actions: fill the brow shape immediately with hair strokes
-      if (msg.region && msg.region.includes('eyebrow') && state.imageLoaded && state.landmarks) {
-        if (msg.region === 'both_eyebrows') {
-          fillBrowWithStrokes('left_eyebrow',  msg.color);
-          fillBrowWithStrokes('right_eyebrow', msg.color);
-        } else {
-          fillBrowWithStrokes(msg.region, msg.color);
-        }
-      }
       break;
 
     case 'joint_update':
-      console.log('[joint_update] region:', state.motionRegion, 'browPhase:', state._browPhase, 'joints:', JSON.stringify(msg.joints));
       if (state.imageLoaded && state.landmarks && state.running) {
-        drawStrokeFromJoints(msg.joints, msg.color, msg.action);
+        const isEyebrowRegion = state.motionRegion && state.motionRegion.includes('eyebrow');
+        if (isEyebrowRegion) {
+          if (msg.brow_phase === 'sweep') {
+            drawBrowFrameByFrame(msg.joints, msg.color);
+          }
+        } else {
+          drawStrokeFromJoints(msg.joints, msg.color, msg.action);
+        }
       }
       break;
 
@@ -578,22 +575,16 @@ function handleMessage(msg) {
       state._browPhase        = msg.brow_phase  || null;
       state._browPass         = msg.brow_pass   ?? null;
       state._browTotal        = msg.brow_total  || 1;
-      // Only reset sweep gate on non-sweep phases (approach, return, retreat)
-      // During sweep phases keep it open so joint_update draws immediately
-      if (msg.brow_phase !== 'sweep') {
-        state._sweepStarted = false;
-      }
+      state._browPassDrawn    = false;  // reset so next sweep draws a fresh pass
+      if (msg.brow_phase === 'reposition') state._browOnRightSide = true;
+      state._sweepStarted     = false;
       state._browArchDrawn    = false;
       if (state.currentStroke.length > 1) {
         state.strokeHistory.push([...state.currentStroke]);
       }
-      state.currentStroke = [];
-      state._lastHalf     = null;
+      state.currentStroke = [];      state._lastHalf     = null;
       const pct = ((msg.step - 1) / msg.total) * 100;
       progressFill.style.width = pct + '%';
-      if (msg.brow_phase === 'reposition') {
-        state._browOnRightSide = true;
-      }
       break;
     }
 
@@ -716,7 +707,6 @@ function loadImage(file) {
       state.imageLoaded = true;
       state.strokeHistory = [];
       clearSpineCache();
-      clearBrowSpineCache();
       drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
 
       log('Image loaded. Detecting face landmarks…', 'info');
@@ -897,7 +887,7 @@ function clearSpineCache() { _spineCache = {}; }
 
 // ── Eyebrow drawing constants (tune these) ───────────────────────
 const BROW_STROKE_PASSES = 3;    // repetitions for thickness
-const BROW_STROKE_WIDTH  = 4;    // thickness of the brow line
+const BROW_STROKE_WIDTH  = 2;    // thickness of the brow line
 const BROW_STROKE_ALPHA  = 0.50; // opacity per pass
 const BROW_V_SPREAD      = 1.5;  // vertical spread between passes
 const BROW_Y_OFFSET      = -3;   // shift up (negative) or down (positive)
@@ -956,32 +946,18 @@ document.getElementById('testBrowBtn').addEventListener('click', () => {
   log('Test brow fill drawn.', 'ok');
 });
 
-// Build a smoothed brow spine for progressive drawing
-// Returns points sorted left→right with Y averaged across neighbours
-function buildSmoothedBrowSpine(browRegion) {
-  if (!state.landmarks) return [];
-  const def = REGION_LANDMARKS[browRegion];
-  if (!def) return [];
-  const pts = def.outer.map(i => ({
-    x: state.landmarks[i].x * drawCanvas.width,
-    y: state.landmarks[i].y * drawCanvas.height,
-  })).sort((a, b) => a.x - b.x);
-  // Smooth Y by averaging neighbours — removes zigzag
-  return pts.map((p, i) => {
-    const nb = pts.slice(Math.max(0, i-2), Math.min(pts.length, i+3));
-    return { x: p.x, y: nb.reduce((s, n) => s + n.y, 0) / nb.length + BROW_Y_OFFSET };
-  });
-}
+function drawBrowFrameByFrame(joints, color) {
+  const region = state.motionRegion || 'left_eyebrow';
+  const browRegion = region === 'both_eyebrows'
+    ? (state._browOnRightSide ? 'right_eyebrow' : 'left_eyebrow')
+    : region;
 
-let _browSpineCache = {};
-function getSmoothedBrowSpine(browRegion) {
-  if (!_browSpineCache[browRegion]) {
-    _browSpineCache[browRegion] = buildSmoothedBrowSpine(browRegion);
+  // Draw one fill pass — called once per sweep phase via _browPassDrawn gate
+  if (!state._browPassDrawn) {
+    state._browPassDrawn = true;
+    fillBrowWithStrokes(browRegion, color);
   }
-  return _browSpineCache[browRegion];
 }
-
-function clearBrowSpineCache() { _browSpineCache = {}; }
 
 function drawStrokeFromJoints(joints, color, action) {
   const region    = state.motionRegion || 'lips';
@@ -991,32 +967,27 @@ function drawStrokeFromJoints(joints, color, action) {
   const isEyebrow = region.includes('eyebrow');
   const brush     = BRUSH[region] || BRUSH._default;
 
-  // ── Gate ─────────────────────────────────────────────────────
+  // ── Gate: block painting until _1 has moved away from start ──
   if (!state._sweepStarted) {
-    if (isEyebrow) {
-      // For brows: only block during approach (brow_phase !== 'sweep')
-      if (state._browPhase !== 'sweep') return;
-      state._sweepStarted = true;
-    } else {
-      if (Math.abs(hAngle) < 2.5) return;
-      state._sweepStarted = true;
-    }
+    if (Math.abs(hAngle) < 2.5) return;
+    state._sweepStarted = true;
   }
 
-  // ── Get canvas point from joint angle ────────────────────────
-  let pt;
+  // ── Map _1 angle to position along the brow/lip spine ────────
+  let spine, pt;
 
   if (isEyebrow) {
+    // Pick the correct brow spine based on which side _1 is on
     const browRegion = region === 'both_eyebrows'
       ? (hAngle >= 0 ? 'left_eyebrow' : 'right_eyebrow')
       : region;
-    const spine = getSmoothedBrowSpine(browRegion);
-    if (spine.length < 2) return;
+    spine = getSpine(browRegion, 'all');
+    if (spine.length === 0) return;
+    // Map angle to t: left brow inner(8)→outer(26), right brow inner(-8)→outer(-26)
     const inner = hAngle >= 0 ? 8  : -8;
     const outer = hAngle >= 0 ? 26 : -26;
     const t = Math.max(0, Math.min(1, (hAngle - inner) / (outer - inner)));
     pt = sampleSpine(spine, hAngle >= 0 ? t : 1 - t);
-
   } else {
     // Lips
     const half = wrist4 >= 3 ? 'lower' : 'upper';
@@ -1025,14 +996,29 @@ function drawStrokeFromJoints(joints, color, action) {
       state.currentStroke = [];
     }
     state._lastHalf = half;
-    const spine = getSpine(region, half);
+    spine = getSpine(region, half);
     if (spine.length === 0) return;
     const hRatio = Math.max(-1, Math.min(1, hAngle / H_ANGLE_RANGE));
-    pt = sampleSpine(spine, (1 - hRatio) / 2);
+    const t = (1 - hRatio) / 2;
+    pt = sampleSpine(spine, t);
   }
 
   if (!pt) return;
 
+  // ── Eyebrow: fill the whole shape with strokes ────────────────
+  if (isEyebrow) {
+    const browRegion = region === 'both_eyebrows'
+      ? (hAngle >= 0 ? 'left_eyebrow' : 'right_eyebrow')
+      : region;
+    // Only fill once per sweep pass — track with _lastBrowFillAngle
+    if (!state._lastBrowFillAngle || Math.abs(hAngle - state._lastBrowFillAngle) > 3) {
+      state._lastBrowFillAngle = hAngle;
+      fillBrowWithStrokes(browRegion, color);
+    }
+    return;
+  }
+
+  // ── Lips: continuous stroke ───────────────────────────────────
   state.currentStroke.push({ ...pt, color, wrist4 });
   const pts = state.currentStroke;
   if (pts.length < 2) return;
@@ -1041,24 +1027,15 @@ function drawStrokeFromJoints(joints, color, action) {
   const curr = pts[pts.length - 1];
 
   drawCtx.save();
-  drawCtx.globalAlpha              = isEyebrow ? BROW_STROKE_ALPHA : brush.alpha;
-  drawCtx.globalCompositeOperation = 'source-over';
+  drawCtx.globalAlpha              = brush.alpha;
+  drawCtx.globalCompositeOperation = brush.blend;
   drawCtx.strokeStyle              = color;
-  drawCtx.lineWidth                = isEyebrow ? BROW_STROKE_WIDTH : brush.width;
+  drawCtx.lineWidth                = brush.width;
   drawCtx.lineCap                  = 'round';
   drawCtx.lineJoin                 = 'round';
   drawCtx.beginPath();
-  if (pts.length >= 3 && isEyebrow) {
-    // Use quadratic curve through midpoint for smooth brow stroke
-    const p0 = pts[pts.length - 3];
-    const mx = (p0.x + curr.x) / 2;
-    const my = (p0.y + curr.y) / 2;
-    drawCtx.moveTo(p0.x, p0.y);
-    drawCtx.quadraticCurveTo(prev.x, prev.y, mx, my);
-  } else {
-    drawCtx.moveTo(prev.x, prev.y);
-    drawCtx.lineTo(curr.x, curr.y);
-  }
+  drawCtx.moveTo(prev.x, prev.y);
+  drawCtx.lineTo(curr.x, curr.y);
   drawCtx.stroke();
   drawCtx.restore();
 }
@@ -1140,4 +1117,4 @@ applyBtn.addEventListener('click', () => {
 connect();
 </script>
 </body>
-</html>
+</html>c

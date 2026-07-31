@@ -360,28 +360,28 @@ class StreamingExecutor:
     """Wraps MotionExecutor; intercepts _snap_to to stream angles to browser."""
 
     def __init__(self, base_executor: MotionExecutor, ws: WebSocketServerProtocol, action: str, color: str):
-        self._exec   = base_executor
-        self._ws     = ws
-        self._action = action
-        self._color  = color
+        self._exec         = base_executor
+        self._ws           = ws
+        self._action       = action
+        self._color        = color
+        self._current_meta = {}  # phase metadata for current action — sent with every frame
 
-        # Monkey-patch _snap_to to intercept every frame
         original_snap = base_executor._snap_to
 
         async def _streaming_snap(pose: dict[str, float]) -> None:
             original_snap(pose)
-            msg = json.dumps({
+            msg = {
                 "type":   "joint_update",
                 "action": self._action,
                 "color":  self._color,
                 "joints": pose,
-            })
+            }
+            msg.update(self._current_meta)  # includes brow_phase in every frame
             try:
-                await self._ws.send(msg)
+                await self._ws.send(json.dumps(msg))
             except Exception:
-                pass  # client disconnected mid-motion
+                pass
 
-        # Store async snap; we'll call it from an async runner
         self._async_snap = _streaming_snap
         self._original_snap = original_snap
 
@@ -394,6 +394,8 @@ class StreamingExecutor:
 
         for i, action in enumerate(plan.actions, 1):
             meta = meta_list[i - 1] if i - 1 < len(meta_list) else {}
+            self._current_meta = meta  # update so all joint_update frames carry this phase
+            print(f"  [phase] step {i}: {meta.get('brow_phase', 'none')} action={action.type}")
             msg = {
                 "type":        "action_start",
                 "step":        i,
@@ -405,6 +407,7 @@ class StreamingExecutor:
             await self._ws.send(json.dumps(msg))
             await self._run_action_streaming(action)
 
+        self._current_meta = {}
         await self._ws.send(json.dumps({"type": "done"}))
 
     async def _run_action_streaming(self, action: Action) -> None:
