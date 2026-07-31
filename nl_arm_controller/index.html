@@ -394,6 +394,7 @@ const state = {
   motionJoints:   null,       // which joints drive horizontal/vertical
   strokeHistory:  [],         // for undo
   currentStroke:  [],         // points in the current stroke
+  _browSweepPts:  [],         // points streamed so far in the current brow sweep pass
   availableActions: {},       // populated from server on connect
 };
 
@@ -549,6 +550,7 @@ function handleMessage(msg) {
       state._browSide         = 'left';
       state._browOnRightSide  = false;
       state._browPassDrawn    = false;
+      state._browSweepPts     = [];
       statusPill.textContent = 'running';
       statusPill.className   = 'status-pill running';
       progressBar.classList.add('visible');
@@ -576,7 +578,22 @@ function handleMessage(msg) {
       state._browPass         = msg.brow_pass   ?? null;
       state._browTotal        = msg.brow_total  || 1;
       state._browPassDrawn    = false;  // reset so next sweep draws a fresh pass
-      if (msg.brow_phase === 'reposition') state._browOnRightSide = true;
+
+      if (msg.brow_phase === 'sweep') {
+        // Fresh pass — don't connect a line back to wherever the last pass ended.
+        state._browSweepPts = [];
+      }
+      if (msg.brow_phase === 'reposition') {
+        // This side is done — record it once for undo (it's already drawn
+        // on the canvas via the progressive strokes above; this just makes
+        // it a single undoable/redrawable entry like fillBrowWithStrokes would).
+        const finishedRegion = state._browOnRightSide ? 'right_eyebrow' : 'left_eyebrow';
+        if (state._browSweepPts && state._browSweepPts.length > 1) {
+          state.strokeHistory.push([{ _browFill: true, browRegion: finishedRegion, color: state.motionColor }]);
+        }
+        state._browOnRightSide = true;
+        state._browSweepPts    = [];
+      }
       state._sweepStarted     = false;
       state._browArchDrawn    = false;
       if (state.currentStroke.length > 1) {
@@ -597,6 +614,14 @@ function handleMessage(msg) {
       if (state.currentStroke.length > 0) {
         state.strokeHistory.push([...state.currentStroke]);
         state.currentStroke = [];
+      }
+      if (state.motionRegion && state.motionRegion.includes('eyebrow') &&
+          state._browSweepPts && state._browSweepPts.length > 1) {
+        const finishedRegion = state.motionRegion === 'both_eyebrows'
+          ? (state._browOnRightSide ? 'right_eyebrow' : 'left_eyebrow')
+          : state.motionRegion;
+        state.strokeHistory.push([{ _browFill: true, browRegion: finishedRegion, color: state.motionColor }]);
+        state._browSweepPts = [];
       }
       statusPill.textContent = 'connected';
       statusPill.className   = 'status-pill connected';
@@ -888,14 +913,18 @@ function clearSpineCache() { _spineCache = {}; }
 // ── Eyebrow drawing constants (tune these) ───────────────────────
 const BROW_STROKE_PASSES = 3;    // repetitions for thickness
 const BROW_STROKE_WIDTH  = 2;    // thickness of the brow line
-const BROW_STROKE_ALPHA  = 0.50; // opacity per pass
 const BROW_V_SPREAD      = 1.5;  // vertical spread between passes
 const BROW_Y_OFFSET      = -3;   // shift up (negative) or down (positive)
 
+// Instant full-brow render — used for the test button and for replaying
+// history on undo. Live streaming during a real motion uses the
+// progressive drawBrowFrameByFrame/drawBrowSegment path below instead,
+// so a real application never calls this (that would double-paint it).
 function fillBrowWithStrokes(browRegion, color) {
   if (!state.landmarks) return;
   const def = REGION_LANDMARKS[browRegion];
   if (!def) return;
+  const brush = BRUSH[browRegion] || BRUSH._default;
 
   // Get all brow points and sort by X
   const pts = def.outer.map(i => ({
@@ -916,8 +945,8 @@ function fillBrowWithStrokes(browRegion, color) {
   for (let pass = -half; pass <= half; pass++) {
     const yOff = pass * BROW_V_SPREAD + BROW_Y_OFFSET;
     drawCtx.save();
-    drawCtx.globalAlpha              = BROW_STROKE_ALPHA;
-    drawCtx.globalCompositeOperation = 'source-over';
+    drawCtx.globalAlpha              = brush.alpha;
+    drawCtx.globalCompositeOperation = brush.blend;
     drawCtx.strokeStyle              = color;
     drawCtx.lineWidth                = BROW_STROKE_WIDTH;
     drawCtx.lineCap                  = 'round';
@@ -946,16 +975,59 @@ document.getElementById('testBrowBtn').addEventListener('click', () => {
   log('Test brow fill drawn.', 'ok');
 });
 
+// Called on every streamed joint_update during a brow "sweep" phase.
+// Maps the arm's current _1 angle to a point along the brow spine (same
+// inner→outer mapping the (unused-for-brows) drawStrokeFromJoints already
+// used) and draws only the newest segment, so the line grows in step with
+// the arm instead of appearing all at once on the first frame.
 function drawBrowFrameByFrame(joints, color) {
   const region = state.motionRegion || 'left_eyebrow';
   const browRegion = region === 'both_eyebrows'
     ? (state._browOnRightSide ? 'right_eyebrow' : 'left_eyebrow')
     : region;
 
-  // Draw one fill pass — called once per sweep phase via _browPassDrawn gate
-  if (!state._browPassDrawn) {
-    state._browPassDrawn = true;
-    fillBrowWithStrokes(browRegion, color);
+  const spine = getSpine(browRegion, 'all');
+  if (spine.length === 0) return;
+
+  const hJoint = (state.motionJoints && state.motionJoints.horizontal) || '_1';
+  const hAngle = joints[hJoint] || 0;
+  const inner  = hAngle >= 0 ?  8 :  -8;
+  const outer  = hAngle >= 0 ? 26 : -26;
+  const t      = Math.max(0, Math.min(1, (hAngle - inner) / (outer - inner)));
+  const pt     = sampleSpine(spine, hAngle >= 0 ? t : 1 - t);
+  if (!pt) return;
+
+  drawBrowSegment(browRegion, pt, color);
+}
+
+// Draws just the incremental bit of brow line between the previous
+// streamed point and this one, across the same offset passes fillBrowWithStrokes
+// uses for thickness — so a full sweep pass builds up gradually rather than
+// all at once.
+function drawBrowSegment(browRegion, pt, color) {
+  const brush = BRUSH[browRegion] || BRUSH._default;
+  if (!state._browSweepPts) state._browSweepPts = [];
+  state._browSweepPts.push(pt);
+  if (state._browSweepPts.length < 2) return;
+
+  const prev = state._browSweepPts[state._browSweepPts.length - 2];
+  const curr = state._browSweepPts[state._browSweepPts.length - 1];
+
+  const half = Math.floor(BROW_STROKE_PASSES / 2);
+  for (let pass = -half; pass <= half; pass++) {
+    const yOff = pass * BROW_V_SPREAD + BROW_Y_OFFSET;
+    drawCtx.save();
+    drawCtx.globalAlpha              = brush.alpha;
+    drawCtx.globalCompositeOperation = brush.blend;
+    drawCtx.strokeStyle              = color;
+    drawCtx.lineWidth                = BROW_STROKE_WIDTH;
+    drawCtx.lineCap                  = 'round';
+    drawCtx.lineJoin                 = 'round';
+    drawCtx.beginPath();
+    drawCtx.moveTo(prev.x, prev.y + yOff);
+    drawCtx.lineTo(curr.x, curr.y + yOff);
+    drawCtx.stroke();
+    drawCtx.restore();
   }
 }
 
@@ -1117,4 +1189,4 @@ applyBtn.addEventListener('click', () => {
 connect();
 </script>
 </body>
-</html>c
+</html>
