@@ -192,10 +192,10 @@ BROW_R_OUTER        = -26.0   # right brow outer corner
 # LATERAL PASS tuning
 # Each pass is one continuous inner→outer sweep at a slightly different height.
 # Passes stack vertically to build up the layered hair texture of the brow.
-BROW_PASS_COUNT     =   5     # number of lateral passes per brow
+BROW_PASS_COUNT     =   2     # number of lateral passes per brow
                                # more passes = fuller/denser brow
-BROW_PASS_DUR       =  0.55   # duration of each inner→outer sweep
-BROW_RETURN_DUR     =  0.30   # duration of outer→inner return between passes
+BROW_PASS_DUR       =  1.00   # duration of each inner→outer sweep
+BROW_RETURN_DUR     =  0.40   # duration of outer→inner return between passes
 BROW_V_STEP         =   1.5   # _2 shift per pass (degrees) — each pass sits
                                # slightly higher, building the brow shape
                                # positive = passes move upward on the brow
