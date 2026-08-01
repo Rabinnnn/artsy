@@ -220,12 +220,12 @@
     max-width: 100%;
   }
 
-  #faceCanvas, #drawCanvas {
+  #faceCanvas, #drawCanvas, #hintCanvas {
     display: block;
     max-width: 100%;
   }
 
-  #drawCanvas {
+  #drawCanvas, #hintCanvas {
     position: absolute;
     top: 0; left: 0;
     pointer-events: none;
@@ -344,6 +344,29 @@
     <!-- Test brow -->
     <button class="undo-btn" id="testBrowBtn" style="margin-top:4px">🧪 Test Brow Fill</button>
 
+    <!-- Brush thickness -->
+    <div>
+      <div class="section-label">Brush Thickness</div>
+      <div style="display:flex; flex-direction:column; gap:10px;">
+        <label style="display:flex; flex-direction:column; gap:4px; font-size:0.78rem; color:var(--muted);">
+          Lipstick
+          <input type="range" id="lipThicknessSlider" min="2" max="16" step="1" value="8">
+        </label>
+        <label style="display:flex; flex-direction:column; gap:4px; font-size:0.78rem; color:var(--muted);">
+          Eyebrow
+          <input type="range" id="browThicknessSlider" min="-2" max="6" step="0.5" value="0">
+        </label>
+      </div>
+    </div>
+
+    <!-- Detection guide toggle -->
+    <div>
+      <label style="display:flex; align-items:center; gap:8px; font-size:0.78rem; color:var(--muted); cursor:pointer;">
+        <input type="checkbox" id="showHintsToggle" checked>
+        Show detection guide outline
+      </label>
+    </div>
+
     <!-- Log -->
     <div>
       <div class="section-label">Activity</div>
@@ -363,6 +386,7 @@
     <div class="canvas-wrap" id="canvasWrap" style="display:none">
       <canvas id="faceCanvas"></canvas>
       <canvas id="drawCanvas"></canvas>
+      <canvas id="hintCanvas"></canvas>
       <div class="progress-bar" id="progressBar"><div class="progress-fill" id="progressFill"></div></div>
     </div>
   </div>
@@ -395,6 +419,7 @@ const state = {
   strokeHistory:  [],         // for undo
   currentStroke:  [],         // points in the current stroke
   _browSweepX:  [],         // x-positions streamed so far in the current brow sweep pass
+  showHints:      true,       // whether the facial-feature detection guide is visible
   availableActions: {},       // populated from server on connect
 };
 
@@ -473,8 +498,10 @@ const REGION_LANDMARKS = {
 
 const faceCanvas  = document.getElementById('faceCanvas');
 const drawCanvas  = document.getElementById('drawCanvas');
+const hintCanvas  = document.getElementById('hintCanvas');
 const faceCtx     = faceCanvas.getContext('2d');
 const drawCtx     = drawCanvas.getContext('2d');
+const hintCtx     = hintCanvas.getContext('2d');
 const canvasWrap  = document.getElementById('canvasWrap');
 const emptyState  = document.getElementById('emptyState');
 const applyBtn    = document.getElementById('applyBtn');
@@ -702,6 +729,18 @@ document.getElementById('customColor').addEventListener('input', e => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// Brush thickness controls
+// ═══════════════════════════════════════════════════════════════
+
+document.getElementById('lipThicknessSlider').addEventListener('input', e => {
+  BRUSH.lips.width = parseFloat(e.target.value);
+});
+
+document.getElementById('browThicknessSlider').addEventListener('input', e => {
+  BROW_THICKNESS_PAD = parseFloat(e.target.value);
+});
+
+// ═══════════════════════════════════════════════════════════════
 // Image upload + MediaPipe
 // ═══════════════════════════════════════════════════════════════
 
@@ -728,8 +767,8 @@ function loadImage(file) {
       // Size canvas to image, max 640px wide
       const maxW = 640;
       const scale = img.width > maxW ? maxW / img.width : 1;
-      faceCanvas.width  = drawCanvas.width  = Math.round(img.width  * scale);
-      faceCanvas.height = drawCanvas.height = Math.round(img.height * scale);
+      faceCanvas.width  = drawCanvas.width  = hintCanvas.width  = Math.round(img.width  * scale);
+      faceCanvas.height = drawCanvas.height = hintCanvas.height = Math.round(img.height * scale);
 
       faceCtx.drawImage(img, 0, 0, faceCanvas.width, faceCanvas.height);
 
@@ -740,6 +779,7 @@ function loadImage(file) {
       state.strokeHistory = [];
       clearSpineCache();
       drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+      hintCtx.clearRect(0, 0, hintCanvas.width, hintCanvas.height);
 
       log('Image loaded. Detecting face landmarks…', 'info');
       detectLandmarks(img);
@@ -783,10 +823,15 @@ function onFaceMeshResults(results) {
   updateApplyBtn();
 }
 
-// Draw landmark dots + outline so the user can verify detection coverage
+// Draw landmark dots + outline so the user can verify detection coverage.
+// Rendered on its own canvas (hintCtx), completely separate from the
+// makeup canvas (drawCtx) — this is what previously caused the dark
+// speckling on lipstick (hint dots were sitting under/over the multiply-
+// blended strokes) and the outline lingering after makeup was applied.
 function drawLandmarkHints() {
   if (!state.landmarks) return;
-  drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+  hintCtx.clearRect(0, 0, hintCanvas.width, hintCanvas.height);
+  if (!state.showHints) return;
 
   // Always draw lip hints
   _drawRegionHints('lips', 'rgba(201,96,122,0.4)', 'rgba(201,96,122,0.6)', true);
@@ -801,32 +846,39 @@ function _drawRegionHints(region, outlineColor, dotColor, splitHalves) {
   if (!def) return;
 
   const pt = i => ({
-    x: state.landmarks[i].x * drawCanvas.width,
-    y: state.landmarks[i].y * drawCanvas.height,
+    x: state.landmarks[i].x * hintCanvas.width,
+    y: state.landmarks[i].y * hintCanvas.height,
   });
 
   // Draw outline — open path for eyebrows, closed for lips
-  drawCtx.beginPath();
+  hintCtx.beginPath();
   def.outer.forEach((idx, i) => {
     const { x, y } = pt(idx);
-    i === 0 ? drawCtx.moveTo(x, y) : drawCtx.lineTo(x, y);
+    i === 0 ? hintCtx.moveTo(x, y) : hintCtx.lineTo(x, y);
   });
-  if (!def.ordered) drawCtx.closePath();  // only close lips, not eyebrows
-  drawCtx.strokeStyle = outlineColor;
-  drawCtx.lineWidth   = 1;
-  drawCtx.stroke();
+  if (!def.ordered) hintCtx.closePath();  // only close lips, not eyebrows
+  hintCtx.strokeStyle = outlineColor;
+  hintCtx.lineWidth   = 1;
+  hintCtx.stroke();
 
   // Draw dots
   const allIdx = [...new Set([...def.outer, ...(def.inner || [])])];
   allIdx.forEach(i => {
     const { x, y } = pt(i);
     const isUpper = splitHalves && def.outer.slice(0, 11).includes(i);
-    drawCtx.fillStyle = isUpper ? 'rgba(220,100,130,0.85)' : dotColor;
-    drawCtx.beginPath();
-    drawCtx.arc(x, y, 1.8, 0, Math.PI * 2);
-    drawCtx.fill();
+    hintCtx.fillStyle = isUpper ? 'rgba(220,100,130,0.85)' : dotColor;
+    hintCtx.beginPath();
+    hintCtx.arc(x, y, 1.8, 0, Math.PI * 2);
+    hintCtx.fill();
   });
 }
+
+// Detection guide visibility toggle
+const showHintsToggle = document.getElementById('showHintsToggle');
+showHintsToggle.addEventListener('change', () => {
+  state.showHints = showHintsToggle.checked;
+  drawLandmarkHints();
+});
 
 // ═══════════════════════════════════════════════════════════════
 // Stroke drawing — follows actual lip landmark curve
@@ -919,6 +971,11 @@ function clearSpineCache() { _spineCache = {}; }
 
 // Look up the (screen-space, x-sorted) top and bottom edge points of a brow,
 // used to fill the whole enclosed shape rather than tracing its outline.
+// Extra vertical padding applied to the brow fill shape — positive values
+// thicken the brow (push the top edge up, bottom edge down), negative
+// values thin it. Adjustable live via the "Eyebrow" thickness slider.
+let BROW_THICKNESS_PAD = 0;
+
 function getBrowRows(browRegion) {
   if (!state.landmarks) return null;
   const def = REGION_LANDMARKS[browRegion];
@@ -928,8 +985,10 @@ function getBrowRows(browRegion) {
     y: state.landmarks[i].y * drawCanvas.height,
   });
   return {
-    upper: def.upperRow.map(toPt).sort((a, b) => a.x - b.x),
-    lower: def.lowerRow.map(toPt).sort((a, b) => a.x - b.x),
+    upper: def.upperRow.map(toPt).sort((a, b) => a.x - b.x)
+      .map(p => ({ x: p.x, y: p.y - BROW_THICKNESS_PAD })),
+    lower: def.lowerRow.map(toPt).sort((a, b) => a.x - b.x)
+      .map(p => ({ x: p.x, y: p.y + BROW_THICKNESS_PAD })),
   };
 }
 
@@ -1101,6 +1160,19 @@ function drawStrokeFromJoints(joints, color, action) {
   }
 
   // ── Lips: continuous stroke ───────────────────────────────────
+  // Skip near-duplicate points. When the arm slows down (e.g. near a
+  // corner or a turnaround between reps), consecutive frames land almost
+  // on top of each other — drawing a full multiply-blended stroke for
+  // each one stacks the same pixels over and over, which is what was
+  // producing the dark speckled spots. Only draw once the point has
+  // actually moved.
+  const MIN_STROKE_STEP_PX = 1.2;
+  if (state.currentStroke.length > 0) {
+    const last = state.currentStroke[state.currentStroke.length - 1];
+    const moved = Math.hypot(pt.x - last.x, pt.y - last.y);
+    if (moved < MIN_STROKE_STEP_PX) return;
+  }
+
   state.currentStroke.push({ ...pt, color, wrist4 });
   const pts = state.currentStroke;
   if (pts.length < 2) return;
@@ -1199,4 +1271,4 @@ applyBtn.addEventListener('click', () => {
 connect();
 </script>
 </body>
-</html>
+</html>c
