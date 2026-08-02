@@ -344,6 +344,9 @@
     <!-- Test brow -->
     <button class="undo-btn" id="testBrowBtn" style="margin-top:4px">🧪 Test Brow Fill</button>
 
+    <!-- Test blush -->
+    <button class="undo-btn" id="testBlushBtn" style="margin-top:4px">🧪 Test Blush</button>
+
     <!-- Brush thickness -->
     <div>
       <div class="section-label">Brush Thickness</div>
@@ -485,8 +488,15 @@ const REGION_LANDMARKS = {
     verticalJoint:   '_2',
   },
   left_cheek: {
+    // Apple-of-the-cheek contour. Blush is a soft, feathered round patch
+    // rather than a traced outline, so getCheekCenter() reduces this to a
+    // centroid + a radius derived from the detected face width. The
+    // right cheek reuses these same points, mirrored across the face's
+    // vertical midline at draw time (see getCheekCenter) — there's no
+    // separate right_cheek entry needed here.
     outer: [116,117,118,119,120,121,128,126,142,36,205,187,50,118],
     inner: [116,117,118,119,120,121,128,126,142,36,205,187,50,118],
+    radiusRatio: 0.11,
     horizontalJoint: '_1',
     verticalJoint:   '_2',
   },
@@ -585,6 +595,7 @@ function handleMessage(msg) {
       state._browOnRightSide  = false;
       state._browPassDrawn    = false;
       state._browSweepX     = [];
+      state._cheekOnRightSide = false;
       statusPill.textContent = 'running';
       statusPill.className   = 'status-pill running';
       progressBar.classList.add('visible');
@@ -596,9 +607,14 @@ function handleMessage(msg) {
     case 'joint_update':
       if (state.imageLoaded && state.landmarks && state.running) {
         const isEyebrowRegion = state.motionRegion && state.motionRegion.includes('eyebrow');
+        const isCheekRegion   = state.motionRegion && state.motionRegion.includes('cheek');
         if (isEyebrowRegion) {
           if (msg.brow_phase === 'sweep') {
             drawBrowFrameByFrame(msg.joints, msg.color);
+          }
+        } else if (isCheekRegion) {
+          if (msg.cheek_phase === 'sweep') {
+            drawCheekFrameByFrame(msg.joints, msg.color, msg.cheek_pass);
           }
         } else {
           drawStrokeFromJoints(msg.joints, msg.color, msg.action);
@@ -628,6 +644,13 @@ function handleMessage(msg) {
         state._browOnRightSide = true;
         state._browSweepX    = [];
       }
+
+      if (msg.cheek_phase === 'reposition') {
+        // This cheek is done — record it once for undo, then move to the next.
+        const finishedCheek = state._cheekOnRightSide ? 'right_cheek' : 'left_cheek';
+        state.strokeHistory.push([{ _cheekFill: true, cheekRegion: finishedCheek, color: state.motionColor }]);
+        state._cheekOnRightSide = true;
+      }
       state._sweepStarted     = false;
       state._browArchDrawn    = false;
       if (state.currentStroke.length > 1) {
@@ -656,6 +679,12 @@ function handleMessage(msg) {
           : state.motionRegion;
         state.strokeHistory.push([{ _browFill: true, browRegion: finishedRegion, color: state.motionColor }]);
         state._browSweepX = [];
+      }
+      if (state.motionRegion && state.motionRegion.includes('cheek')) {
+        const finishedCheek = state.motionRegion === 'both_cheeks'
+          ? (state._cheekOnRightSide ? 'right_cheek' : 'left_cheek')
+          : state.motionRegion;
+        state.strokeHistory.push([{ _cheekFill: true, cheekRegion: finishedCheek, color: state.motionColor }]);
       }
       statusPill.textContent = 'connected';
       statusPill.className   = 'status-pill connected';
@@ -896,9 +925,164 @@ const BRUSH = {
   both_eyebrows: { width: 3,  alpha: 0.75, blend: 'multiply' },
   left_eye:      { width: 2,  alpha: 0.80, blend: 'multiply' },
   right_eye:     { width: 2,  alpha: 0.80, blend: 'multiply' },
-  left_cheek:    { width: 18, alpha: 0.22, blend: 'multiply' },
+  left_cheek:    { width: 18, alpha: 0.11, blend: 'multiply' },
+  right_cheek:   { width: 18, alpha: 0.11, blend: 'multiply' },
+  both_cheeks:   { width: 18, alpha: 0.11, blend: 'multiply' },
   _default:      { width: 5,  alpha: 0.55, blend: 'multiply' },
 };
+
+// ═══════════════════════════════════════════════════════════════
+// Blush — soft round patch on each cheek
+// ═══════════════════════════════════════════════════════════════
+
+// Must match the server's CHEEK_L_CENTER / CHEEK_R_CENTER / CHEEK_WOBBLE
+// (server.py) — used to turn the arm's current _1 angle into a 0..1
+// progress value for the current buffing pass.
+const CHEEK_L_CENTER = 34.0;
+const CHEEK_R_CENTER = -34.0;
+const CHEEK_WOBBLE   = 5.0;
+
+// How many buffing passes make up a full blush — must match
+// CHEEK_PASS_COUNT in server.py. Used by fillCheekInstant (test button,
+// undo/redraw) to replicate the same build-up a live application produces.
+const CHEEK_PASS_COUNT = 4;
+
+function hexToRgba(hex, alpha) {
+  const h = hex.replace('#', '');
+  const r = parseInt(h.substring(0, 2), 16);
+  const g = parseInt(h.substring(2, 4), 16);
+  const b = parseInt(h.substring(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+// Each of the CHEEK_PASS_COUNT buffing passes lands as its own small,
+// slightly offset dab rather than all four repainting the exact same
+// circle — real blush is dabbed on at a few spots and buffed together,
+// not one perfectly uniform disc. Offsets/scale are fractions of the
+// cheek's base radius; angle is a small per-dab rotation for the ellipse
+// squash below, so each dab reads as a soft brushed stroke rather than a
+// perfect dot.
+const CHEEK_DAB_OFFSETS = [
+  { dx: -0.14, dy: -0.10, scale: 0.75, tilt: -0.35 },
+  { dx:  0.12, dy:  0.05, scale: 0.85, tilt:  0.15 },
+  { dx: -0.05, dy:  0.14, scale: 0.65, tilt: -0.10 },
+  { dx:  0.08, dy: -0.12, scale: 0.70, tilt:  0.30 },
+];
+const CHEEK_ELLIPSE_SQUASH = 0.68;  // flattens each dab into a soft oval
+const CHEEK_BRUSH_ANGLE    = -0.30; // radians; overall brushed-along-cheekbone tilt, mirrored for the right cheek
+
+// Cheek centre + radius in canvas pixels. The contour is only defined for
+// the left cheek (REGION_LANDMARKS.left_cheek) — the right cheek is
+// derived by mirroring those same points across the face's vertical
+// midline (computed from landmarks 234/454, the standard MediaPipe
+// left/right face-oval points), rather than guessing a separate set of
+// right-side landmark indices. The centre is the contour's centroid and
+// the radius scales with the detected face width, so it adapts to the
+// uploaded photo automatically.
+function getCheekCenter(cheekRegion) {
+  if (!state.landmarks) return null;
+  const def = REGION_LANDMARKS.left_cheek;
+  if (!def || !def.outer) return null;
+
+  const faceL = state.landmarks[234];
+  const faceR = state.landmarks[454];
+  if (!faceL || !faceR) return null;
+
+  const faceMidX    = ((faceL.x + faceR.x) / 2) * drawCanvas.width;
+  const faceWidthPx = Math.abs(faceR.x - faceL.x) * drawCanvas.width;
+
+  const pts = def.outer.map(i => {
+    const lm = state.landmarks[i];
+    let x = lm.x * drawCanvas.width;
+    const y = lm.y * drawCanvas.height;
+    if (cheekRegion === 'right_cheek') x = 2 * faceMidX - x; // mirror left → right
+    return { x, y };
+  });
+
+  const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+  const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+
+  return { x: cx, y: cy, radius: faceWidthPx * (def.radiusRatio || 0.11) };
+}
+
+// Paints one soft, feathered dab — an oval (not a perfect circle) offset
+// from the cheek's centre according to CHEEK_DAB_OFFSETS[passIndex], and
+// grown outward as `t` (0..1) increases. Because the gradient is always
+// transparent at the very centre and at the current outer edge, repeated
+// calls with a growing `t` build up the dab without re-darkening pixels
+// that are already fully painted — the same anti-stacking idea used for
+// the progressive brow fill. Different passes land in different spots so
+// the result reads as dabbed-and-buffed rather than one uniform disc.
+function drawCheekSegment(cheekRegion, passIndex, t, color) {
+  const base = getCheekCenter(cheekRegion);
+  if (!base || t <= 0) return;
+  const brush = BRUSH[cheekRegion] || BRUSH._default;
+
+  const n   = CHEEK_DAB_OFFSETS.length;
+  const dab = CHEEK_DAB_OFFSETS[((passIndex || 0) % n + n) % n];
+  const dabCx = base.x + dab.dx * base.radius;
+  const dabCy = base.y + dab.dy * base.radius;
+  const dabR  = base.radius * dab.scale;
+  const r     = dabR * Math.min(1, t);
+  if (r <= 0) return;
+
+  const mirror = cheekRegion === 'right_cheek' ? -1 : 1;
+  const angle  = mirror * (CHEEK_BRUSH_ANGLE + dab.tilt);
+
+  drawCtx.save();
+  drawCtx.globalCompositeOperation = brush.blend;
+  drawCtx.translate(dabCx, dabCy);
+  drawCtx.rotate(angle);
+  drawCtx.scale(1, CHEEK_ELLIPSE_SQUASH);
+
+  const grad = drawCtx.createRadialGradient(0, 0, 0, 0, 0, r);
+  grad.addColorStop(0,    hexToRgba(color, 0));
+  grad.addColorStop(0.5,  hexToRgba(color, 0));
+  grad.addColorStop(0.78, hexToRgba(color, brush.alpha));
+  grad.addColorStop(1,    hexToRgba(color, 0));
+  drawCtx.fillStyle = grad;
+  drawCtx.beginPath();
+  drawCtx.arc(0, 0, r, 0, Math.PI * 2);
+  drawCtx.fill();
+  drawCtx.restore();
+}
+
+// Called on every streamed joint_update during a cheek "sweep" phase.
+// Maps the arm's current _1 angle to progress through that buffing pass
+// and grows that pass's dab in step with it.
+function drawCheekFrameByFrame(joints, color, passIndex) {
+  const region = state.motionRegion || 'left_cheek';
+  const cheekRegion = region === 'both_cheeks'
+    ? (state._cheekOnRightSide ? 'right_cheek' : 'left_cheek')
+    : region;
+
+  const centreAngle = cheekRegion === 'right_cheek' ? CHEEK_R_CENTER : CHEEK_L_CENTER;
+  const lo = Math.min(centreAngle - CHEEK_WOBBLE, centreAngle + CHEEK_WOBBLE);
+  const hi = Math.max(centreAngle - CHEEK_WOBBLE, centreAngle + CHEEK_WOBBLE);
+
+  const hJoint = (state.motionJoints && state.motionJoints.horizontal) || '_1';
+  const hAngle = joints[hJoint] || 0;
+  const t = Math.max(0, Math.min(1, (hAngle - lo) / (hi - lo)));
+
+  drawCheekSegment(cheekRegion, passIndex, t, color);
+}
+
+// Instant full-blush render — used for the test button and for replaying
+// history on undo. Replays each of the CHEEK_PASS_COUNT dabs at full
+// radius so the result matches what a live application would have built up.
+function fillCheekInstant(cheekRegion, color) {
+  for (let i = 0; i < CHEEK_PASS_COUNT; i++) {
+    drawCheekSegment(cheekRegion, i, 1, color);
+  }
+}
+
+// Test button — draws blush directly without needing the robot
+document.getElementById('testBlushBtn').addEventListener('click', () => {
+  if (!state.landmarks) { log('Upload a face image first', 'err'); return; }
+  fillCheekInstant('left_cheek',  state.selectedColor);
+  fillCheekInstant('right_cheek', state.selectedColor);
+  log('Test blush drawn.', 'ok');
+});
 
 // Build a sorted spine of landmark points for a region,
 // ordered left→right by x coordinate, for curve-following
@@ -1217,6 +1401,12 @@ function redrawAllStrokes() {
       return;
     }
 
+    // Blush fill entry
+    if (stroke[0]._cheekFill) {
+      fillCheekInstant(stroke[0].cheekRegion, stroke[0].color);
+      return;
+    }
+
     // Lip/other continuous strokes
     if (stroke.length < 2) return;
     const region = state.motionRegion || 'lips';
@@ -1271,4 +1461,4 @@ applyBtn.addEventListener('click', () => {
 connect();
 </script>
 </body>
-</html>c
+</html>

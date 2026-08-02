@@ -192,10 +192,10 @@ BROW_R_OUTER        = -26.0   # right brow outer corner
 # LATERAL PASS tuning
 # Each pass is one continuous inner→outer sweep at a slightly different height.
 # Passes stack vertically to build up the layered hair texture of the brow.
-BROW_PASS_COUNT     =   2     # number of lateral passes per brow
+BROW_PASS_COUNT     =   5     # number of lateral passes per brow
                                # more passes = fuller/denser brow
-BROW_PASS_DUR       =  1.00   # duration of each inner→outer sweep
-BROW_RETURN_DUR     =  0.40   # duration of outer→inner return between passes
+BROW_PASS_DUR       =  0.55   # duration of each inner→outer sweep
+BROW_RETURN_DUR     =  0.30   # duration of outer→inner return between passes
 BROW_V_STEP         =   1.5   # _2 shift per pass (degrees) — each pass sits
                                # slightly higher, building the brow shape
                                # positive = passes move upward on the brow
@@ -320,6 +320,128 @@ def _both_eyebrows_plan() -> MotionPlan:
     )
 
 
+# ---------------------------------------------------------------------------
+# Blush motion tuning
+# ---------------------------------------------------------------------------
+# ARM POSITION
+CHEEK_LIFT_HEIGHT   = -20.0   # _2: shoulder height at cheek level (lower on the face than the brows)
+CHEEK_REACH_FORWARD =  14.0   # _3: elbow extension toward face
+
+# BUFFING POSITIONS — _1 angle at the centre of each cheek, and how far the
+# arm wobbles side-to-side while "buffing" the blush in
+CHEEK_L_CENTER      =  34.0   # left cheek centre
+CHEEK_R_CENTER      = -34.0   # right cheek centre
+CHEEK_WOBBLE        =   5.0   # +/- degrees swept on each buffing pass
+
+# BUFFING PASS tuning
+# Each pass is one small side-to-side buff at the cheek. Passes stack to
+# build up soft, blended colour density, like real blush application.
+CHEEK_PASS_COUNT    =   4     # number of buffing passes per cheek
+                               # more passes = deeper/denser blush
+CHEEK_PASS_DUR      =  0.45   # duration of each buffing sweep
+CHEEK_RETURN_DUR    =  0.30   # duration of the return between passes
+CHEEK_WRIST_TILT    =   6.0   # _4: gentle downward-angled dab, like a brush
+
+# GENERAL TIMING
+CHEEK_APPROACH_DUR  =  1.1    # time to lift arm to cheek height
+CHEEK_PAUSE_DUR     =  0.2    # pause before buffing starts
+CHEEK_RETREAT_DUR   =  1.5    # time to return home
+CHEEK_BETWEEN_DUR   =  0.9    # reposition time between left and right cheek
+
+
+def _cheek_passes_one_side(centre: float) -> list[tuple[Action, dict]]:
+    """Generate CHEEK_PASS_COUNT small buffing passes across one cheek.
+    Returns list of (Action, metadata) tuples so the browser knows which
+    pass is a sweep (paint) vs a return (don't paint).
+    """
+    result: list[tuple[Action, dict]] = []
+    lo = centre - CHEEK_WOBBLE
+    hi = centre + CHEEK_WOBBLE
+
+    for i in range(CHEEK_PASS_COUNT):
+        # Sweep: lo → hi (paint this — builds up the blush)
+        result.append((
+            Action(
+                type="set_pose",
+                pose={"_1": hi, "_2": CHEEK_LIFT_HEIGHT, "_4": CHEEK_WRIST_TILT},
+                duration=CHEEK_PASS_DUR,
+            ),
+            {"cheek_phase": "sweep", "cheek_pass": i, "cheek_total": CHEEK_PASS_COUNT},
+        ))
+
+        # Return: hi → lo (skip painting)
+        if i < CHEEK_PASS_COUNT - 1:
+            result.append((
+                Action(
+                    type="set_pose",
+                    pose={"_1": lo, "_2": CHEEK_LIFT_HEIGHT, "_4": CHEEK_WRIST_TILT},
+                    duration=CHEEK_RETURN_DUR,
+                ),
+                {"cheek_phase": "return", "cheek_pass": i, "cheek_total": CHEEK_PASS_COUNT},
+            ))
+
+    return result
+
+
+def _build_cheek_plan(say: str, centres: list[float]) -> MotionPlan:
+    """Build a blush plan with phase metadata attached as action tags."""
+    tagged: list[tuple[Action, dict]] = []
+
+    for side_idx, centre in enumerate(centres):
+        lo = centre - CHEEK_WOBBLE
+
+        # Approach
+        tagged.append((
+            Action(
+                type="set_pose",
+                pose={"_1": lo, "_2": CHEEK_LIFT_HEIGHT,
+                      "_3": CHEEK_REACH_FORWARD, "_4": CHEEK_WRIST_TILT},
+                duration=CHEEK_APPROACH_DUR,
+            ),
+            {"cheek_phase": "approach"},
+        ))
+        tagged.append((
+            Action(type="wait", duration=CHEEK_PAUSE_DUR),
+            {"cheek_phase": "approach"},
+        ))
+
+        # Passes
+        tagged.extend(_cheek_passes_one_side(centre))
+
+        # Between sides reposition (if more sides follow)
+        if side_idx < len(centres) - 1:
+            next_lo = centres[side_idx + 1] - CHEEK_WOBBLE
+            tagged.append((
+                Action(
+                    type="set_pose",
+                    pose={"_1": next_lo, "_2": CHEEK_LIFT_HEIGHT, "_4": CHEEK_WRIST_TILT},
+                    duration=CHEEK_BETWEEN_DUR,
+                ),
+                {"cheek_phase": "reposition"},
+            ))
+            tagged.append((
+                Action(type="wait", duration=CHEEK_PAUSE_DUR),
+                {"cheek_phase": "reposition"},
+            ))
+
+    # Retreat
+    tagged.append((
+        Action(type="home", duration=CHEEK_RETREAT_DUR),
+        {"cheek_phase": "retreat"},
+    ))
+
+    plan = MotionPlan(say=say, actions=[a for a, _ in tagged])
+    plan._action_meta = [m for _, m in tagged]   # type: ignore[attr-defined]
+    return plan
+
+
+def _blush_plan() -> MotionPlan:
+    return _build_cheek_plan(
+        "Applying blush.",
+        [CHEEK_L_CENTER, CHEEK_R_CENTER],
+    )
+
+
 # Registry — add new actions here as the project grows
 MAKEUP_ACTIONS: dict[str, dict[str, Any]] = {
     "lipstick": {
@@ -346,9 +468,14 @@ MAKEUP_ACTIONS: dict[str, dict[str, Any]] = {
         "joints": {"horizontal": "_1", "vertical": "_2"},
         "label":  "Both Brows",
     },
+    "blush": {
+        "plan":   _blush_plan,
+        "region": "both_cheeks",
+        "joints": {"horizontal": "_1", "vertical": "_2"},
+        "label":  "Blush",
+    },
     # Future actions:
     # "eyeliner": { "plan": _eyeliner_plan, "region": "left_eye", ... },
-    # "blush":    { "plan": _blush_plan,    "region": "left_cheek", ... },
 }
 
 
