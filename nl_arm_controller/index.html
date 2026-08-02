@@ -920,14 +920,14 @@ const V_ANGLE_RANGE = 35;   // _2 vertical sensitivity
 // Brush settings per region — add new regions here as actions are added
 const BRUSH = {
   lips:          { width: 8,  alpha: 0.52, blend: 'multiply' },
-  left_eyebrow:  { width: 3,  alpha: 0.75, blend: 'multiply' },
-  right_eyebrow: { width: 3,  alpha: 0.75, blend: 'multiply' },
-  both_eyebrows: { width: 3,  alpha: 0.75, blend: 'multiply' },
+  left_eyebrow:  { width: 3,  alpha: 0.60, blend: 'multiply' },
+  right_eyebrow: { width: 3,  alpha: 0.60, blend: 'multiply' },
+  both_eyebrows: { width: 3,  alpha: 0.60, blend: 'multiply' },
   left_eye:      { width: 2,  alpha: 0.80, blend: 'multiply' },
   right_eye:     { width: 2,  alpha: 0.80, blend: 'multiply' },
-  left_cheek:    { width: 18, alpha: 0.11, blend: 'multiply' },
-  right_cheek:   { width: 18, alpha: 0.11, blend: 'multiply' },
-  both_cheeks:   { width: 18, alpha: 0.11, blend: 'multiply' },
+  left_cheek:    { width: 18, alpha: 0.07, blend: 'multiply' },
+  right_cheek:   { width: 18, alpha: 0.07, blend: 'multiply' },
+  both_cheeks:   { width: 18, alpha: 0.07, blend: 'multiply' },
   _default:      { width: 5,  alpha: 0.55, blend: 'multiply' },
 };
 
@@ -945,7 +945,7 @@ const CHEEK_WOBBLE   = 5.0;
 // How many buffing passes make up a full blush — must match
 // CHEEK_PASS_COUNT in server.py. Used by fillCheekInstant (test button,
 // undo/redraw) to replicate the same build-up a live application produces.
-const CHEEK_PASS_COUNT = 4;
+const CHEEK_PASS_COUNT = 2;
 
 function hexToRgba(hex, alpha) {
   const h = hex.replace('#', '');

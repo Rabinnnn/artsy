@@ -192,7 +192,7 @@ BROW_R_OUTER        = -26.0   # right brow outer corner
 # LATERAL PASS tuning
 # Each pass is one continuous inner→outer sweep at a slightly different height.
 # Passes stack vertically to build up the layered hair texture of the brow.
-BROW_PASS_COUNT     =   5     # number of lateral passes per brow
+BROW_PASS_COUNT     =   2     # number of lateral passes per brow
                                # more passes = fuller/denser brow
 BROW_PASS_DUR       =  0.55   # duration of each inner→outer sweep
 BROW_RETURN_DUR     =  0.30   # duration of outer→inner return between passes
@@ -336,7 +336,7 @@ CHEEK_WOBBLE        =   5.0   # +/- degrees swept on each buffing pass
 # BUFFING PASS tuning
 # Each pass is one small side-to-side buff at the cheek. Passes stack to
 # build up soft, blended colour density, like real blush application.
-CHEEK_PASS_COUNT    =   4     # number of buffing passes per cheek
+CHEEK_PASS_COUNT    =   2     # number of buffing passes per cheek
                                # more passes = deeper/denser blush
 CHEEK_PASS_DUR      =  0.45   # duration of each buffing sweep
 CHEEK_RETURN_DUR    =  0.30   # duration of the return between passes
