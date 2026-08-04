@@ -1,38 +1,42 @@
-"""Voice/Text-driven SO-101 controller — natural-language motion agent.
+"""Voice/Text-driven SO-101 makeup controller.
 
-Workshop demo: speak or type a command in plain English, and Claude translates
-it into a structured joint-motion plan that the Cyberwave SDK runs on the
-SO-101 arm (or its digital twin in simulation). With --vision, every prompt
-also feeds the latest webcam frame from the Pi-side camera publisher so the
-agent can describe the scene or act on visual context.
+Speak or type a request. DeepSeek classifies it against a fixed menu of
+makeup actions — lipstick, left/right/both eyebrows, blush — and, if it
+matches, dispatches that exact choreographed motion (with an optional
+colour, e.g. "put some red lipstick on") to server.py, which runs it on the
+real (or dry-run) arm and streams it to any connected browser for
+visualization. Requests that don't match one of these actions are politely
+declined — this controller only does makeup, nothing else.
 
-Phase 7 — voice + text + vision agent loop:
+This script never talks to Cyberwave directly — server.py owns the one
+robot connection. This script is just another WebSocket client of it,
+exactly like the browser is, so whatever it triggers shows up live in the
+web app too.
 
-    python nl_arm_controller.py                       # text REPL, drives the twin
+    python server.py                                  # start this first
+    python nl_arm_controller.py                       # text REPL
     python nl_arm_controller.py --voice               # voice REPL (hold SPACE)
-    python nl_arm_controller.py --vision              # text + scene awareness
-    python nl_arm_controller.py --voice --vision      # full demo: voice + scene
-    python nl_arm_controller.py --dry-run             # plan only, no robot motion
+    python nl_arm_controller.py --dry-run             # classify only, don't connect to server.py
     python nl_arm_controller.py --check               # env + deps self-check
 
 Examples to say or type:
-    wave at the audience
-    look up and to the right
-    do a small bow
-    what do you see?                              # vision only
-    is there a red cup?                           # vision only
-    look at the red cup                           # vision-grounded motion
+    put some red lipstick on
+    put some pink lipstick on
+    draw both my eyebrows
+    fill in just my left brow with dark brown
+    add a soft pink blush
 
-`exit`, `quit`, `bye`, or `Ctrl+C` to leave (the arm is always homed first).
+`exit`, `quit`, `bye`, or `Ctrl+C` to leave.
 In voice mode, Esc cancels the *current* recording without exiting.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 import sys
 import time
-import traceback
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -44,28 +48,23 @@ load_dotenv(override=False)
 # Config (from env)
 # ---------------------------------------------------------------------------
 
-CYBERWAVE_API_KEY = os.environ.get("CYBERWAVE_API_KEY")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 MISTRAL_API_KEY = os.environ.get("MISTRAL_API_KEY")
-
-CW_MODE = os.environ.get("CW_MODE", "live")
-CW_ENV_ID = os.environ.get("CYBERWAVE_ENVIRONMENT_ID")
-CW_TWIN_ID = os.environ.get("CYBERWAVE_TWIN_ID")
-CW_CAMERA_INDEX = int(os.environ.get("CW_CAMERA_INDEX", "0"))
 
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-reasoner")
 MISTRAL_STT_MODEL = os.environ.get("MISTRAL_STT_MODEL", "voxtral-mini-latest")
 
-TWIN_ASSET_KEY = "the-robot-studio/so101"
-
 VOICE_ENABLED = os.environ.get("VOICE_ENABLED", "false").lower() == "true"
 SAMPLE_RATE = 16000
+
+# server.py's own WS listener — see HOST/PORT constants in server.py
+ROBOT_SERVER_WS_URL = os.environ.get("ROBOT_SERVER_WS_URL", "ws://localhost:8765")
 
 EXIT_WORDS = {"exit", "quit", "bye", "stop the demo", "shutdown"}
 
 
 # ---------------------------------------------------------------------------
-# Phase 1 self-check (kept for diagnostics)
+# Self-check
 # ---------------------------------------------------------------------------
 
 
@@ -77,11 +76,10 @@ def _check_secret(name: str, value: str | None) -> tuple[str, bool]:
 
 def run_self_check() -> int:
     print("─" * 64)
-    print("  NL → SO-101 Controller — environment self-check")
+    print("  NL → SO-101 Makeup Controller — environment self-check")
     print("─" * 64)
 
     rows = [
-        _check_secret("CYBERWAVE_API_KEY", CYBERWAVE_API_KEY),
         _check_secret("DEEPSEEK_API_KEY", DEEPSEEK_API_KEY),
         _check_secret("MISTRAL_API_KEY", MISTRAL_API_KEY),
     ]
@@ -90,16 +88,14 @@ def run_self_check() -> int:
     keys_ok = all(ok for _, ok in rows)
 
     print()
-    print(f"  CW_MODE                  = {CW_MODE}")
-    print(f"  CYBERWAVE_TWIN_ID        = {CW_TWIN_ID or '(unset)'}")
-    print(f"  CYBERWAVE_ENVIRONMENT_ID = {CW_ENV_ID or '(unset)'}")
-    print(f"  DEEPSEEK_MODEL          = {DEEPSEEK_MODEL}")
+    print(f"  ROBOT_SERVER_WS_URL      = {ROBOT_SERVER_WS_URL}")
+    print(f"  DEEPSEEK_MODEL           = {DEEPSEEK_MODEL}")
     print(f"  MISTRAL_STT_MODEL        = {MISTRAL_STT_MODEL}")
     print(f"  VOICE_ENABLED            = {VOICE_ENABLED}")
 
     print()
     deps_ok = True
-    for mod_name in ("cyberwave", "deepseek", "httpx", "sounddevice", "soundfile", "pynput"):
+    for mod_name in ("websockets", "deepseek", "httpx", "sounddevice", "soundfile", "pynput"):
         try:
             __import__(mod_name)
             print(f"  import {mod_name:<14} ✅")
@@ -109,55 +105,102 @@ def run_self_check() -> int:
 
     print("─" * 64)
     if keys_ok and deps_ok:
-        print("  ✅ Environment ready.")
+        print("  ✅ Environment ready. (Make sure server.py is running separately.)")
         return 0
     print("  ❌ Fix the items marked ❌ above and re-run.")
     return 1
 
 
 # ---------------------------------------------------------------------------
-# Agent loop
+# WebSocket client — mirrors what the browser does, but driven by voice/text
 # ---------------------------------------------------------------------------
 
 
-def _print_banner(
-    twin_uuid: str | None,
-    dry_run: bool,
-    voice: bool,
-    vision: bool,
-    camera_info: str | None = None,
-) -> None:
+class RobotConnection:
+    """Thin WebSocket client for server.py. Sends `apply` messages exactly
+    like the browser's Apply button does, and prints the resulting status
+    stream — the actual drawing happens in the browser, which is watching
+    the same broadcast.
+    """
+
+    def __init__(self, ws) -> None:
+        self._ws = ws
+        self.available_actions: dict[str, dict] = {}
+
+    async def read_ready(self) -> None:
+        raw = await self._ws.recv()
+        msg = json.loads(raw)
+        if msg.get("type") == "ready":
+            self.available_actions = msg.get("actions", {})
+
+    async def apply_makeup(self, action_key: str, color: str) -> bool:
+        """Send the action and print status until it completes. Returns
+        True on success, False on error or connection loss — never raises,
+        so one bad response can't take down the whole REPL.
+        """
+        import websockets
+
+        try:
+            await self._ws.send(json.dumps({
+                "type": "apply", "action": action_key, "color": color,
+            }))
+            return await self._drain_until_done()
+        except websockets.exceptions.ConnectionClosed as exc:
+            print(f"  ❌ lost connection to server.py: code={exc.code} reason={exc.reason!r}")
+            print("     Check server.py's own terminal for what it logged at this moment.")
+            return False
+        except Exception as exc:
+            print(f"  ❌ lost connection to server.py: {exc!r}")
+            return False
+
+    async def _drain_until_done(self) -> bool:
+        while True:
+            raw = await self._ws.recv()
+            msg = json.loads(raw)
+            mtype = msg.get("type")
+
+            if mtype == "say":
+                print(f"  💬  {msg.get('text', '')}")
+            elif mtype == "action_start":
+                phase = msg.get("brow_phase") or msg.get("cheek_phase") or msg.get("action_type")
+                print(f"  ▶  step {msg.get('step')}/{msg.get('total')}  ({phase})")
+            elif mtype == "error":
+                print(f"  ❌  {msg.get('message', 'unknown error')}")
+                return False
+            elif mtype == "done":
+                print("  ✅  done")
+                return True
+            # joint_update / motion_start: nothing to print — the browser draws from these
+
+
+# ---------------------------------------------------------------------------
+# Input helpers
+# ---------------------------------------------------------------------------
+
+
+def _print_banner(dry_run: bool, voice: bool, actions: dict) -> None:
     print("─" * 64)
-    inputs = []
-    if voice:
-        inputs.append("voice")
-    else:
-        inputs.append("text")
-    if vision:
-        inputs.append("vision")
-    print(f"  NL → SO-101 controller  ({' + '.join(inputs)})")
+    print(f"  NL → SO-101 Makeup Controller  ({'voice' if voice else 'text'})")
     print("─" * 64)
-    print(f"  mode:        {'DRY-RUN (no arm)' if dry_run else CW_MODE}")
+    print(f"  mode:        {'DRY-RUN (no server connection)' if dry_run else ROBOT_SERVER_WS_URL}")
     print(f"  planner:     {DEEPSEEK_MODEL}")
     if voice:
         print(f"  STT model:   {MISTRAL_STT_MODEL}")
-    if vision and camera_info:
-        print(f"  camera:      {camera_info}")
-    if twin_uuid:
-        print(f"  arm twin:    {twin_uuid}")
-        print(f"  viewer:      https://cyberwave.com/twin/{twin_uuid}")
+    print()
+    print("  This controller only applies makeup — nothing else:")
+    for key, info in (actions or {}).items():
+        print(f"    • {info.get('label', key)}")
     print()
     print("  Examples:")
-    print("    • wave at the audience")
-    print("    • look up and to the right")
-    print("    • do a small bow")
-    if vision:
-        print("    • what do you see?")
-        print("    • is there a red cup?")
-        print("    • look at the [object]")
+    print("    • put some red lipstick on")
+    print("    • put some pink lipstick on")
+    print("    • draw both my eyebrows")
+    print("    • add a soft pink blush")
     if voice:
         print("  Hold SPACE while speaking, release to send. Esc cancels a turn.")
     print(f"  Exit: {'say' if voice else 'type'} {sorted(EXIT_WORDS)} or press Ctrl+C.")
+    if not dry_run:
+        print("  Open index.html in a browser (connected to the same server.py) to watch it live.")
     print("─" * 64)
 
 
@@ -178,7 +221,12 @@ def _read_voice() -> str | None:
     return transcript
 
 
-def run_agent(dry_run: bool, voice: bool, vision: bool) -> int:
+# ---------------------------------------------------------------------------
+# Agent loop
+# ---------------------------------------------------------------------------
+
+
+async def run_agent(dry_run: bool, voice: bool) -> int:
     if not DEEPSEEK_API_KEY:
         print("❌ DEEPSEEK_API_KEY not set in .env")
         return 1
@@ -187,53 +235,27 @@ def run_agent(dry_run: bool, voice: bool, vision: bool) -> int:
         print("❌ MISTRAL_API_KEY not set in .env (required for --voice)")
         return 1
 
-    from planner import plan_from_utterance, plan_from_utterance_with_image  # noqa: F401
+    from planner import classify_makeup_intent
 
-    executor = None
-    cw = None
-    twin_uuid = None
+    conn: RobotConnection | None = None
+    ws_ctx = None
 
     if not dry_run:
-        if not CYBERWAVE_API_KEY:
-            print("❌ CYBERWAVE_API_KEY not set in .env")
-            return 1
-        if not CW_TWIN_ID or not CW_ENV_ID:
-            print("❌ CYBERWAVE_TWIN_ID and CYBERWAVE_ENVIRONMENT_ID must be set in .env")
-            return 1
+        import websockets
 
-        from cyberwave import Cyberwave  # noqa: WPS433
-
-        from motion import MotionExecutor  # noqa: WPS433
-
-        print("→ Connecting to Cyberwave…")
-        cw = Cyberwave()
-        cw.affect(CW_MODE)
-        robot = cw.twin(TWIN_ASSET_KEY, twin_id=CW_TWIN_ID, environment_id=CW_ENV_ID)
-        twin_uuid = robot.uuid
-        executor = MotionExecutor(robot)
-
-        print("→ Homing…")
-        executor.home(duration=1.0)
-        time.sleep(0.5)
-
-    camera = None
-    camera_info_str: str | None = None
-    if vision:
-        from vision import open_camera_from_env  # noqa: WPS433
-
-        print(f"→ Opening webcam (index {CW_CAMERA_INDEX})…")
+        print(f"→ Connecting to {ROBOT_SERVER_WS_URL}…")
         try:
-            camera = open_camera_from_env()
-        except RuntimeError as exc:
-            print(f"  ❌ {exc}")
+            ws_ctx = websockets.connect(ROBOT_SERVER_WS_URL)
+            ws = await ws_ctx.__aenter__()
+        except Exception as exc:
+            print(f"  ❌ Could not connect to server.py: {exc}")
+            print("     Make sure `python server.py` (or `--dry-run`) is running.")
             return 1
-        camera_info_str = (
-            f"index {camera.info.index} — "
-            f"{camera.info.width}x{camera.info.height} @ {camera.info.fps:.0f} fps"
-        )
-        print(f"  ✓ {camera_info_str}")
+        conn = RobotConnection(ws)
+        await conn.read_ready()
+        print(f"  ✓ connected — {len(conn.available_actions)} makeup actions available")
 
-    _print_banner(twin_uuid, dry_run, voice, vision, camera_info_str)
+    _print_banner(dry_run, voice, conn.available_actions if conn else {})
 
     try:
         while True:
@@ -246,74 +268,37 @@ def run_agent(dry_run: bool, voice: bool, vision: bool) -> int:
             if utterance.lower().rstrip(".!?") in EXIT_WORDS:
                 break
 
-            t0 = time.monotonic()
-            frame_b64: str | None = None
-            if camera is not None:
-                t_frame = time.monotonic()
-                frame_b64 = camera.grab_frame_b64(quality=80)
-                if frame_b64 is None:
-                    print("  ⚠️  webcam read failed; falling back to text-only plan")
-                else:
-                    print(
-                        f"  📷 frame {camera.info.width}x{camera.info.height}  "
-                        f"({(time.monotonic() - t_frame) * 1000:.0f} ms grab+encode, "
-                        f"{len(frame_b64) // 1024} KB b64)"
-                    )
-
+            # Everything below is wrapped so a single bad utterance/response
+            # can never crash the whole REPL — worst case, we print an error
+            # and loop back for the next command.
             try:
-                if camera is not None:
-                    result = plan_from_utterance_with_image(utterance, frame_b64)
-                else:
-                    result = plan_from_utterance(utterance)
-            except Exception as exc:  # network / API failure
-                print(f"  ❌ planner call failed: {exc}")
-                continue
+                t0 = time.monotonic()
+                intent = classify_makeup_intent(utterance)
+                dt = (time.monotonic() - t0) * 1000
 
-            dt = (time.monotonic() - t0) * 1000
+                if not intent.is_makeup or not intent.action:
+                    print(f"  💬  {intent.say}  ({dt:.0f} ms)")
+                    if intent.error:
+                        print(f"     (classifier note: {intent.error})")
+                    continue
 
-            if not result.ok or result.plan is None:
-                print(f"  ❌ planner: {result.error}  ({dt:.0f} ms)")
-                preview = (result.raw_response or "").replace("\n", " ")[:160]
-                if preview:
-                    print(f"     raw: {preview}")
-                continue
+                print(f"  🎨  {intent.action}  (color {intent.color}, {dt:.0f} ms)")
+                print(f"  💬  {intent.say}")
 
-            print(f"  🤖  ({dt:.0f} ms, {len(result.plan.actions)} actions)")
-            if executor is None:
-                print(f"  💬  {result.plan.say}")
-                for i, a in enumerate(result.plan.actions, 1):
-                    print(f"     {i}. {a}")
-                continue
+                if dry_run:
+                    continue
 
-            try:
-                executor.execute(result.plan)
-            except Exception:
-                print("  ❌ executor crashed:")
-                traceback.print_exc()
-                try:
-                    print("  → safety home")
-                    executor.home(duration=1.0)
-                except Exception:
-                    pass
+                await conn.apply_makeup(intent.action, intent.color)
+
+            except Exception as exc:
+                print(f"  ❌ unexpected error handling that command: {exc}")
                 continue
     except KeyboardInterrupt:
         print("\n  (Ctrl+C — shutting down)")
     finally:
-        if executor is not None:
+        if ws_ctx is not None:
             try:
-                print("\n→ Homing before exit…")
-                executor.home(duration=1.0)
-                time.sleep(0.5)
-            except Exception:
-                pass
-        if cw is not None:
-            try:
-                cw.disconnect()
-            except Exception:
-                pass
-        if camera is not None:
-            try:
-                camera.close()
+                await ws_ctx.__aexit__(None, None, None)
             except Exception:
                 pass
 
@@ -332,8 +317,7 @@ def main() -> None:
 
     dry_run = "--dry-run" in sys.argv
     voice = "--voice" in sys.argv
-    vision = "--vision" in sys.argv
-    sys.exit(run_agent(dry_run=dry_run, voice=voice, vision=vision))
+    sys.exit(asyncio.run(run_agent(dry_run=dry_run, voice=voice)))
 
 
 if __name__ == "__main__":

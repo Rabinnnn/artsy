@@ -1,16 +1,18 @@
 """server.py — Makeup Artist Robot WebSocket server.
 
-Runs the arm motion and streams joint angles to the browser in real-time.
-The browser maps those angles onto the uploaded face image.
+Runs the arm motion and streams joint angles to every connected client in
+real-time. The browser maps those angles onto the uploaded face image;
+nl_arm_controller.py (voice/text NL agent) can trigger motions the same way
+a browser button click does — both are just WebSocket clients.
 
 Usage:
     python server.py            # connects to Cyberwave twin
     python server.py --dry-run  # no robot, still streams fake angles for UI testing
 
 Architecture:
-    Browser  ──WS──►  server.py  ──►  MotionExecutor  ──►  Cyberwave twin
-                          │
-                          ◄── joint angle stream (real-time)
+    Browser ──┐                                      ┌──► Browser (visualizes)
+              ├──WS──►  server.py  ──►  MotionExecutor──►  Cyberwave twin
+    nl_arm_controller.py (voice/text)   ◄── joint angle stream (broadcast to all clients)
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -484,19 +487,43 @@ MAKEUP_ACTIONS: dict[str, dict[str, Any]] = {
 # ---------------------------------------------------------------------------
 
 class StreamingExecutor:
-    """Wraps MotionExecutor; intercepts _snap_to to stream angles to browser."""
+    """Wraps MotionExecutor; intercepts _snap_to to stream angles to every
+    connected client (browser tabs, nl_arm_controller.py, etc.) — not just
+    whichever connection triggered the motion.
+    """
 
-    def __init__(self, base_executor: MotionExecutor, ws: WebSocketServerProtocol, action: str, color: str):
-        self._exec         = base_executor
-        self._ws           = ws
-        self._action       = action
-        self._color        = color
-        self._current_meta = {}  # phase metadata for current action — sent with every frame
+    def __init__(self, base_executor: MotionExecutor, broadcast, action: str, color: str,
+                 robot_executor: ThreadPoolExecutor | None = None):
+        self._exec           = base_executor
+        self._broadcast       = broadcast   # async def broadcast(msg: dict) -> None
+        self._action         = action
+        self._color          = color
+        self._current_meta   = {}  # phase metadata for current action — sent with every frame
+        self._robot_executor = robot_executor  # None => dry-run, no real SDK calls
 
         original_snap = base_executor._snap_to
 
         async def _streaming_snap(pose: dict[str, float]) -> None:
-            original_snap(pose)
+            # original_snap() calls the real Cyberwave SDK (robot.joints.set),
+            # which does a network round-trip (MQTT) per joint and is
+            # SYNCHRONOUS. Called directly, this blocks the asyncio event
+            # loop on every one of the ~20 frames/sec streamed during a
+            # motion — for a multi-second plan that's long enough for the
+            # WebSocket ping/pong keepalive to time out, which silently
+            # drops client connections mid-motion ("no close frame received
+            # or sent"). Running it on a dedicated background thread keeps
+            # the event loop free to answer pings while it waits, without
+            # scattering SDK calls across a rotating thread pool (some
+            # MQTT clients expect one consistent calling thread).
+            t0 = time.monotonic()
+            loop = asyncio.get_running_loop()
+            if self._robot_executor is not None:
+                await loop.run_in_executor(self._robot_executor, original_snap, pose)
+            else:
+                original_snap(pose)  # dry-run: no real SDK call, safe to call inline
+            dt_ms = (time.monotonic() - t0) * 1000
+            if dt_ms > 250:
+                print(f"  ⏱  slow robot.joints.set() call: {dt_ms:.0f} ms  pose={pose}")
             msg = {
                 "type":   "joint_update",
                 "action": self._action,
@@ -504,10 +531,7 @@ class StreamingExecutor:
                 "joints": pose,
             }
             msg.update(self._current_meta)  # includes brow_phase in every frame
-            try:
-                await self._ws.send(json.dumps(msg))
-            except Exception:
-                pass
+            await self._broadcast(msg)
 
         self._async_snap = _streaming_snap
         self._original_snap = original_snap
@@ -515,14 +539,14 @@ class StreamingExecutor:
     async def execute_streaming(self, plan: MotionPlan) -> None:
         """Run the plan step by step, streaming angles after each ramp frame."""
         if plan.say:
-            await self._ws.send(json.dumps({"type": "say", "text": plan.say}))
+            await self._broadcast({"type": "say", "text": plan.say})
 
         meta_list = getattr(plan, '_action_meta', [{}] * len(plan.actions))
 
         for i, action in enumerate(plan.actions, 1):
             meta = meta_list[i - 1] if i - 1 < len(meta_list) else {}
             self._current_meta = meta  # update so all joint_update frames carry this phase
-            print(f"  [phase] step {i}: {meta.get('brow_phase', 'none')} action={action.type}")
+            print(f"  [phase] step {i}: {meta.get('brow_phase', meta.get('cheek_phase', 'none'))} action={action.type}")
             msg = {
                 "type":        "action_start",
                 "step":        i,
@@ -531,11 +555,11 @@ class StreamingExecutor:
                 "color":       self._color,
             }
             msg.update(meta)
-            await self._ws.send(json.dumps(msg))
+            await self._broadcast(msg)
             await self._run_action_streaming(action)
 
         self._current_meta = {}
-        await self._ws.send(json.dumps({"type": "done"}))
+        await self._broadcast({"type": "done"})
 
     async def _run_action_streaming(self, action: Action) -> None:
         executor = self._exec
@@ -595,6 +619,29 @@ class RobotServer:
         self.executor: MotionExecutor | None = None
         self.cw       = None
         self._lock    = asyncio.Lock()
+        self._clients: set[WebSocketServerProtocol] = set()
+        # Every real robot.joints.set(...) call runs on this ONE dedicated
+        # thread — not asyncio's default thread pool. Many MQTT-based SDKs
+        # (this one included, per the "MQTT connection settings" banner)
+        # aren't safe to call from an arbitrary/rotating worker thread; they
+        # expect a single consistent thread. This still keeps calls off the
+        # event loop (so WebSocket pings aren't starved) without risking
+        # that assumption.
+        self._robot_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="robot-sdk")
+
+    async def broadcast(self, msg: dict[str, Any]) -> None:
+        """Send a message to every currently-connected client (browser tabs,
+        nl_arm_controller.py, etc.) — whoever triggered the motion doesn't
+        matter, everyone watching should see the same stream.
+        """
+        raw = json.dumps(msg)
+        dead: set[WebSocketServerProtocol] = set()
+        for client in list(self._clients):
+            try:
+                await client.send(raw)
+            except Exception:
+                dead.add(client)
+        self._clients -= dead
 
     def connect_robot(self) -> None:
         if self.dry_run:
@@ -614,6 +661,7 @@ class RobotServer:
 
     async def handle(self, ws: WebSocketServerProtocol) -> None:
         print(f"  ◉ client connected: {ws.remote_address}")
+        self._clients.add(ws)
         try:
             # Send available actions to browser on connect
             await ws.send(json.dumps({
@@ -628,62 +676,106 @@ class RobotServer:
                 except json.JSONDecodeError:
                     continue
 
-                if msg.get("type") == "apply":
-                    action_key = msg.get("action", "lipstick")
-                    color      = msg.get("color", "#cc0000")
-                    await self._apply_makeup(ws, action_key, color)
+                msg_type = msg.get("type")
 
-        except websockets.exceptions.ConnectionClosed:
-            pass
+                try:
+                    if msg_type == "apply":
+                        action_key = msg.get("action", "lipstick")
+                        color      = msg.get("color", "#cc0000")
+                        print(f"  → apply '{action_key}' requested by {ws.remote_address}")
+                        await self._apply_makeup(action_key, color)
+                        print(f"  ← apply '{action_key}' finished normally")
+                except websockets.exceptions.ConnectionClosed:
+                    raise
+                except Exception as exc:
+                    # Belt-and-suspenders: _apply_makeup already guards its own
+                    # execution, but this catches anything unexpected so a bug
+                    # here can never silently kill the socket.
+                    import traceback
+                    print(f"  ❌ unexpected error handling message {msg_type!r}:")
+                    traceback.print_exc()
+                    try:
+                        await self.broadcast({"type": "error", "message": str(exc)})
+                    except Exception:
+                        pass
+
+        except websockets.exceptions.ConnectionClosed as exc:
+            print(f"  ⚠ connection closed abnormally for {ws.remote_address}: "
+                  f"code={exc.code} reason={exc.reason!r}")
         finally:
+            self._clients.discard(ws)
             print(f"  ○ client disconnected: {ws.remote_address}")
 
-    async def _apply_makeup(self, ws: WebSocketServerProtocol, action_key: str, color: str) -> None:
+    async def _apply_makeup(self, action_key: str, color: str) -> None:
         if action_key not in MAKEUP_ACTIONS:
-            await ws.send(json.dumps({"type": "error", "message": f"Unknown action: {action_key}"}))
+            await self.broadcast({"type": "error", "message": f"Unknown action: {action_key}"})
             return
 
         async with self._lock:  # one motion at a time
             action_def = MAKEUP_ACTIONS[action_key]
             plan       = action_def["plan"]()  # fresh plan each call
 
-            await ws.send(json.dumps({
+            await self.broadcast({
                 "type":   "motion_start",
                 "action": action_key,
                 "region": action_def["region"],
                 "joints": action_def["joints"],
                 "color":  color,
-            }))
+            })
 
-            if self.executor is None:
-                # Dry-run: simulate angle stream
-                await self._dry_run_stream(ws, plan, action_key, color)
-            else:
-                streamer = StreamingExecutor(self.executor, ws, action_key, color)
-                await streamer.execute_streaming(plan)
+            try:
+                if self.executor is None:
+                    # Dry-run: simulate angle stream
+                    await self._dry_run_stream(plan, action_key, color)
+                else:
+                    streamer = StreamingExecutor(self.executor, self.broadcast, action_key, color,
+                                                  robot_executor=self._robot_executor)
+                    await streamer.execute_streaming(plan)
+            except Exception as exc:
+                # Never let a robot/SDK error kill the connection ungracefully —
+                # print the full traceback here (server console) so it's
+                # diagnosable, and tell every connected client cleanly instead
+                # of dropping their socket.
+                import traceback
+                print(f"  ❌ error executing '{action_key}':")
+                traceback.print_exc()
+                await self.broadcast({
+                    "type":    "error",
+                    "message": f"Failed to execute '{action_key}': {exc}",
+                })
+                # Try to get the arm back to a known-safe position after a
+                # failed motion, rather than leaving it wherever it stalled.
+                # Off the event loop thread for the same reason as
+                # _streaming_snap above — this is a real, blocking SDK call.
+                if self.executor is not None:
+                    try:
+                        loop = asyncio.get_running_loop()
+                        await loop.run_in_executor(self._robot_executor, self.executor.home, 1.0)
+                    except Exception:
+                        pass
 
     async def _dry_run_stream(
-        self, ws: WebSocketServerProtocol, plan: MotionPlan, action: str, color: str
+        self, plan: MotionPlan, action: str, color: str
     ) -> None:
         """Simulate joint angle stream without a real robot."""
         import math
         if plan.say:
-            await ws.send(json.dumps({"type": "say", "text": plan.say}))
+            await self.broadcast({"type": "say", "text": plan.say})
 
         # Simulate the lipstick stroke angles over time
         total_steps = 60
         for i in range(total_steps + 1):
             t     = i / total_steps
             angle = math.sin(t * math.pi * 2) * 10.0  # sweeps ±10°
-            await ws.send(json.dumps({
+            await self.broadcast({
                 "type":   "joint_update",
                 "action": action,
                 "color":  color,
                 "joints": {"_1": angle, "_2": -25.0, "_3": 15.0},
-            }))
+            })
             await asyncio.sleep(0.05)
 
-        await ws.send(json.dumps({"type": "done"}))
+        await self.broadcast({"type": "done"})
 
 
 # ---------------------------------------------------------------------------
