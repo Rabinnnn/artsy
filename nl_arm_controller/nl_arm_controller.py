@@ -259,7 +259,11 @@ async def run_agent(dry_run: bool, voice: bool) -> int:
 
     try:
         while True:
-            utterance = _read_voice() if voice else _read_text()
+            # input()/voice capture are blocking — run them off the event
+            # loop so this connection keeps answering the server's WebSocket
+            # ping/pong keepalive while we're waiting for the user, instead
+            # of going quiet and looking like a dead connection.
+            utterance = await asyncio.to_thread(_read_voice if voice else _read_text)
             if utterance is None:
                 break
 
@@ -273,7 +277,13 @@ async def run_agent(dry_run: bool, voice: bool) -> int:
             # and loop back for the next command.
             try:
                 t0 = time.monotonic()
-                intent = classify_makeup_intent(utterance)
+                # classify_makeup_intent() makes a synchronous DeepSeek API
+                # call that can take anywhere from ~2s to 30+ seconds. Same
+                # reasoning as above: run it off the event loop so we don't
+                # go silent on the WebSocket connection while waiting for it
+                # — that silence was killing the connection (code 1006)
+                # before the resulting 'apply' message ever got sent.
+                intent = await asyncio.to_thread(classify_makeup_intent, utterance)
                 dt = (time.monotonic() - t0) * 1000
 
                 if not intent.is_makeup or not intent.action:

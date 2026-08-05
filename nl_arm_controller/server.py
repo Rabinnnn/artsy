@@ -683,8 +683,7 @@ class RobotServer:
                         action_key = msg.get("action", "lipstick")
                         color      = msg.get("color", "#cc0000")
                         print(f"  → apply '{action_key}' requested by {ws.remote_address}")
-                        await self._apply_makeup(action_key, color)
-                        print(f"  ← apply '{action_key}' finished normally")
+                        asyncio.create_task(self._apply_makeup_task(action_key, color))
                 except websockets.exceptions.ConnectionClosed:
                     raise
                 except Exception as exc:
@@ -705,6 +704,15 @@ class RobotServer:
         finally:
             self._clients.discard(ws)
             print(f"  ○ client disconnected: {ws.remote_address}")
+
+    async def _apply_makeup_task(self, action_key: str, color: str) -> None:
+        try:
+            await self._apply_makeup(action_key, color)
+            print(f"  ← apply '{action_key}' finished normally")
+        except Exception as exc:
+            import traceback
+            print(f"  ❌ apply task for '{action_key}' failed:")
+            traceback.print_exc()
 
     async def _apply_makeup(self, action_key: str, color: str) -> None:
         if action_key not in MAKEUP_ACTIONS:

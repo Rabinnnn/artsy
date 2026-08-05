@@ -27,258 +27,6 @@ from dataclasses import dataclass
 from motion import MotionPlan, validate_plan
 
 
-# ---------------------------------------------------------------------------
-# Makeup action routing
-#
-# server.py owns a small library of hand-tuned, carefully-choreographed
-# motion plans for makeup application (lipstick / brows / blush) — each one
-# is phase-tagged so the browser can sync its drawing to the arm. Rather
-# than have the LLM invent fresh joint angles for these (which would break
-# that sync and the safety tuning), we ask it to *classify* the utterance
-# against this fixed menu and hand back an action key + a plain-English
-# colour description. nl_arm_controller.py only supports these actions —
-# there is no generic/free-form gesture fallback.
-# ---------------------------------------------------------------------------
-
-# Mirrors the keys in server.py's MAKEUP_ACTIONS. Kept as a plain constant
-# here (rather than importing server.py) since server.py is a standalone
-# WebSocket-server script, not a library.
-MAKEUP_ACTIONS_INFO: dict[str, dict[str, str]] = {
-    "lipstick": {
-        "description": "apply lipstick to the lips",
-        "default_color": "#cc2244",
-    },
-    "left_eyebrow": {
-        "description": "draw/fill in the left eyebrow only",
-        "default_color": "#3b2a1a",
-    },
-    "right_eyebrow": {
-        "description": "draw/fill in the right eyebrow only",
-        "default_color": "#3b2a1a",
-    },
-    "both_eyebrows": {
-        "description": "draw/fill in both eyebrows",
-        "default_color": "#3b2a1a",
-    },
-    "blush": {
-        "description": "apply blush to both cheeks",
-        "default_color": "#e8909a",
-    },
-}
-
-_MAKEUP_MENU = "\n".join(
-    f'  "{k}" — {v["description"]}' for k, v in MAKEUP_ACTIONS_INFO.items()
-)
-
-MAKEUP_INTENT_SYSTEM_PROMPT = f"""You classify a user's spoken/typed request against a fixed menu of
-makeup actions a robot arm can perform. You do nothing else — no chat, no
-markdown, no commentary.
-
-Available actions:
-{_MAKEUP_MENU}
-
-This robot ONLY does these {len(MAKEUP_ACTIONS_INFO)} things. It cannot wave, bow, point,
-look around, or perform any other motion. If the request doesn't clearly
-match one of the actions above, set "is_makeup" to false.
-
-Output format — return EXACTLY one JSON object, no code fences:
-
-{{
-  "is_makeup":  true or false,
-  "action":     "<one of the action keys above, or null if is_makeup is false>",
-  "color_name": "<a short plain-English colour description if the user mentioned or implied one (e.g. \"red\", \"soft pink\", \"dark brown\"), else null>",
-  "say":        "<a short first-person confirmation of what you're about to do>"
-}}
-
-Rules:
-- Describe the colour in plain words — do NOT output a hex code. The caller
-  maps colour words to hex itself.
-- If the user says "eyebrows" without specifying a side, use "both_eyebrows".
-- If the request is unclear, or asks for anything other than the actions
-  above (waving, pointing, looking somewhere, describing a scene, etc.),
-  set is_makeup to false, action to null, and say something like "I can
-  only apply lipstick, blush, or eyebrows right now."
-- NEVER output prose outside the JSON object.
-
-Examples:
-
-User: "put some red lipstick on"
-{{"is_makeup":true,"action":"lipstick","color_name":"red","say":"Applying red lipstick."}}
-
-User: "can you draw my eyebrows"
-{{"is_makeup":true,"action":"both_eyebrows","color_name":null,"say":"Drawing both eyebrows."}}
-
-User: "add a bit of blush, something soft and pink"
-{{"is_makeup":true,"action":"blush","color_name":"soft pink","say":"Applying a soft pink blush."}}
-
-User: "wave at the audience"
-{{"is_makeup":false,"action":null,"color_name":null,"say":"I can only apply lipstick, blush, or eyebrows right now."}}
-
-User: "fill in just my left brow with a dark brown"
-{{"is_makeup":true,"action":"left_eyebrow","color_name":"dark brown","say":"Drawing your left eyebrow in dark brown."}}
-"""
-
-
-# Deterministic colour-word to hex mapping. We never trust the LLM to emit
-# valid hex directly (a malformed value there was a likely source of
-# crashes) — instead it describes the colour in plain English and this
-# table resolves it. Checked longest-phrase-first so e.g. "dark brown"
-# matches before the plainer "brown".
-_COLOR_KEYWORDS: list[tuple[str, str]] = [
-    ("dark brown",  "#2a1c10"),
-    ("light brown", "#6b4423"),
-    ("brown",       "#3b2a1a"),
-    ("black",       "#1a1a1a"),
-    ("dark red",    "#7a1020"),
-    ("bright red",  "#d81e2c"),
-    ("red",         "#cc2233"),
-    ("hot pink",    "#e0457b"),
-    ("soft pink",   "#e8a0ac"),
-    ("light pink",  "#f2b8c6"),
-    ("pink",        "#d9748a"),
-    ("coral",       "#ff6f61"),
-    ("orange",      "#d2601a"),
-    ("purple",      "#7b3f61"),
-    ("plum",        "#6a2c4d"),
-    ("mauve",       "#9b6a6c"),
-    ("berry",       "#8b2942"),
-    ("rose",        "#c96578"),
-    ("nude",        "#c68863"),
-    ("peach",       "#f4a988"),
-    ("wine",        "#722f37"),
-    ("burgundy",    "#6d1b2c"),
-    ("beige",       "#c9a27a"),
-]
-
-_HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
-
-
-def resolve_color(color_name: str | None, default_hex: str) -> str:
-    """Turn a plain-English colour description into a hex colour, falling
-    back to `default_hex` if nothing matches. Also accepts a literal hex
-    string as a pass-through, in case one shows up anyway — but the LLM
-    is never *asked* for hex, so this is a safety net, not the main path.
-    """
-    if not color_name:
-        return default_hex
-    text = color_name.strip().lower()
-    if _HEX_RE.match(text):
-        return text
-    for keyword, hex_value in _COLOR_KEYWORDS:
-        if keyword in text:
-            return hex_value
-    return default_hex
-
-
-@dataclass
-class MakeupIntentResult:
-    """Outcome of classifying an utterance against the makeup action menu."""
-
-    is_makeup: bool
-    action: str | None
-    color: str | None
-    say: str
-    raw_response: str
-    error: str | None
-
-    @property
-    def ok(self) -> bool:
-        return self.error is None
-
-
-def parse_makeup_intent_json(raw: str) -> tuple[MakeupIntentResult | None, str | None]:
-    """Best-effort extract + validate the classifier's JSON object."""
-    text = (raw or "").strip()
-    if not text:
-        return None, "empty response"
-
-    text = _FENCE_HEAD.sub("", text)
-    text = _FENCE_TAIL.sub("", text)
-
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None, f"no JSON object found in response: {raw[:200]!r}"
-
-    blob = text[start : end + 1]
-    try:
-        data = json.loads(blob)
-    except json.JSONDecodeError as exc:
-        return None, f"JSON decode error: {exc}  (blob: {blob[:200]!r})"
-
-    if not isinstance(data, dict):
-        return None, f"top-level JSON must be an object, got {type(data).__name__}"
-
-    is_makeup  = bool(data.get("is_makeup"))
-    action     = data.get("action")
-    color_name = data.get("color_name")
-    say        = str(data.get("say", ""))
-
-    if is_makeup and action in MAKEUP_ACTIONS_INFO:
-        color = resolve_color(color_name, MAKEUP_ACTIONS_INFO[action]["default_color"])
-    else:
-        is_makeup = False
-        action    = None
-        color     = None
-        if not say:
-            say = "I can only apply lipstick, blush, or eyebrows right now."
-
-    return MakeupIntentResult(
-        is_makeup=is_makeup, action=action, color=color, say=say,
-        raw_response=raw, error=None,
-    ), None
-
-
-def classify_makeup_intent(
-    utterance: str,
-    *,
-    model: str | None = None,
-    max_tokens: int = 200,
-    temperature: float = 0.0,
-) -> MakeupIntentResult:
-    """Ask DeepSeek whether `utterance` requests one of the canned makeup
-    actions, and if so, which one + what colour. Never raises — any
-    API/parse failure comes back as is_makeup=False with `.error` set, so
-    the caller can always show a friendly message instead of crashing.
-    """
-    fallback_say = "Sorry, I didn't catch a lipstick, blush, or eyebrow request there."
-
-    try:
-        client = _make_client()
-    except EnvironmentError as exc:
-        return MakeupIntentResult(
-            is_makeup=False, action=None, color=None, say=fallback_say,
-            raw_response="", error=str(exc),
-        )
-
-    chosen_model = model or os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
-
-    try:
-        response = client.chat.completions.create(
-            model=chosen_model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            messages=[
-                {"role": "system", "content": MAKEUP_INTENT_SYSTEM_PROMPT},
-                {"role": "user", "content": utterance},
-            ],
-        )
-        raw = response.choices[0].message.content or ""
-    except Exception as exc:  # network / API failure
-        return MakeupIntentResult(
-            is_makeup=False, action=None, color=None, say=fallback_say,
-            raw_response="", error=f"classifier call failed: {exc}",
-        )
-
-    result, err = parse_makeup_intent_json(raw)
-    if result is None:
-        return MakeupIntentResult(
-            is_makeup=False, action=None, color=None, say=fallback_say,
-            raw_response=raw, error=err,
-        )
-    return result
-
-
 SYSTEM_PROMPT = """You are the motion planner for an SO-101 6-axis robot arm.
 
 You translate the user's natural-language request into a JSON motion plan that
@@ -556,3 +304,101 @@ def plan_from_utterance_with_image(
 
     plan, err = parse_plan_json(raw)
     return PlanResult(plan=plan, raw_response=raw, error=err, model=chosen_model)
+
+# ---------------------------------------------------------------------------
+# Makeup intent classifier — used by nl_arm_controller.py
+# ---------------------------------------------------------------------------
+
+AVAILABLE_ACTIONS = {
+    "lipstick":      {"label": "Lipstick",   "colors": True},
+    "left_eyebrow":  {"label": "Left Brow",  "colors": True},
+    "right_eyebrow": {"label": "Right Brow", "colors": True},
+    "both_eyebrows": {"label": "Both Brows", "colors": True},
+    "blush":         {"label": "Blush",      "colors": True},
+}
+
+CLASSIFY_SYSTEM_PROMPT = """You are a makeup intent classifier for a robot makeup artist.
+
+The user will say something in natural language. You must decide:
+1. Is this a makeup request (lipstick, eyebrows, blush, etc.)? 
+2. If yes, which action does it map to?
+3. What color did they request (if any)?
+
+Available actions:
+  lipstick      — apply lipstick to the lips
+  left_eyebrow  — draw the left eyebrow only
+  right_eyebrow — draw the right eyebrow only
+  both_eyebrows — draw both eyebrows
+  blush         — apply blush to the cheeks
+
+Common color name → hex mappings to use:
+  red=#cc0000, dark red=#8b0000, crimson=#dc143c, pink=#ff69b4,
+  light pink=#ffb6c1, hot pink=#ff1493, rose=#ff007f, coral=#ff6347,
+  nude=#c68642, mauve=#e0b0ff, berry=#8b008b, brown=#8b4513,
+  dark brown=#3d1c02, black=#1a1a1a, natural=#6b4226
+
+Output EXACTLY one JSON object, no code fences, no commentary:
+{
+  "is_makeup": true or false,
+  "action": "lipstick" | "left_eyebrow" | "right_eyebrow" | "both_eyebrows" | "blush" | null,
+  "color": "<hex color e.g. #cc0000>",
+  "say": "<one short sentence: what you will do, or why you can't help>"
+}
+
+Rules:
+- If not a makeup request, set is_makeup=false, action=null, color="#cc0000"
+- Default color is #cc2244 (deep red) if no color is mentioned
+- Always return valid JSON with all four fields
+- say should be friendly and natural
+"""
+
+
+@dataclass
+class MakeupIntent:
+    is_makeup: bool
+    action: str | None
+    color: str
+    say: str
+    error: str | None = None
+
+
+def classify_makeup_intent(utterance: str) -> MakeupIntent:
+    """Call DeepSeek to classify utterance as a makeup intent.
+    
+    Returns a MakeupIntent with action, color, and a spoken response.
+    Never raises — errors are captured in intent.error.
+    """
+    client = _make_client()
+    model  = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            max_tokens=200,
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": CLASSIFY_SYSTEM_PROMPT},
+                {"role": "user",   "content": utterance},
+            ],
+        )
+        raw  = response.choices[0].message.content or ""
+        raw  = raw.strip()
+        # Strip markdown fences if model ignores instructions
+        raw  = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+        raw  = re.sub(r"\s*```$", "", raw)
+        data = json.loads(raw)
+
+        return MakeupIntent(
+            is_makeup = bool(data.get("is_makeup", False)),
+            action    = data.get("action") or None,
+            color     = data.get("color") or "#cc2244",
+            say       = data.get("say") or "",
+        )
+    except Exception as exc:
+        return MakeupIntent(
+            is_makeup = False,
+            action    = None,
+            color     = "#cc2244",
+            say       = "Sorry, I couldn't understand that request.",
+            error     = str(exc),
+        )
