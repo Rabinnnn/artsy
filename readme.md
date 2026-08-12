@@ -1,5 +1,6 @@
 # Artsy
 
+
 ## Description
 Artsy is a project implemented using Cyberwave's SO-101 robotic arm.
 It is designed to automate daily makeup routines, some of which tend to be tasking when done by human beings.
