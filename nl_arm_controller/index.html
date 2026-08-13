@@ -358,6 +358,8 @@
         <label style="display:flex; flex-direction:column; gap:4px; font-size:0.78rem; color:var(--muted);">
           Eyebrow
           <input type="range" id="browThicknessSlider" min="-2" max="6" step="0.5" value="0">
+          <!-- <input type="range" id="browVerticalSliderIdHere" min="-2" max="6" step="0.5" value="0"> -->
+
         </label>
       </div>
     </div>
@@ -769,6 +771,10 @@ document.getElementById('browThicknessSlider').addEventListener('input', e => {
   BROW_THICKNESS_PAD = parseFloat(e.target.value);
 });
 
+// document.getElementById('browVerticalSliderIdHere').addEventListener('input', e => {
+//   BROW_VERTICAL_SHIFT = parseFloat(e.target.value);
+// });
+
 // ═══════════════════════════════════════════════════════════════
 // Image upload + MediaPipe
 // ═══════════════════════════════════════════════════════════════
@@ -1159,6 +1165,8 @@ function clearSpineCache() { _spineCache = {}; }
 // thicken the brow (push the top edge up, bottom edge down), negative
 // values thin it. Adjustable live via the "Eyebrow" thickness slider.
 let BROW_THICKNESS_PAD = 0;
+let BROW_VERTICAL_SHIFT = -6;  // negative = up, positive = down
+
 
 function getBrowRows(browRegion) {
   if (!state.landmarks) return null;
@@ -1170,9 +1178,9 @@ function getBrowRows(browRegion) {
   });
   return {
     upper: def.upperRow.map(toPt).sort((a, b) => a.x - b.x)
-      .map(p => ({ x: p.x, y: p.y - BROW_THICKNESS_PAD })),
+      .map(p => ({ x: p.x, y: p.y - BROW_THICKNESS_PAD + BROW_VERTICAL_SHIFT })),
     lower: def.lowerRow.map(toPt).sort((a, b) => a.x - b.x)
-      .map(p => ({ x: p.x, y: p.y + BROW_THICKNESS_PAD })),
+      .map(p => ({ x: p.x, y: p.y + BROW_THICKNESS_PAD + BROW_VERTICAL_SHIFT})),
   };
 }
 
