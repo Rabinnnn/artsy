@@ -53,8 +53,7 @@ The user issues a voice/text command e.g "apply red lipstick" or "draw some dark
 You should see a web interface as shown below. 
 
 
-  ![alt text](<artsy 1.png>)
-
+  ![alt text](<docs/artsy 1.png>)
 
 - Next, upload your image of a face model. Make sure the image is clear enough to make it possible to detect facial features. For a start, consider using the one provide in this repo, face.jpg, since it provides a detailed 3D render of the face.
 
@@ -63,4 +62,4 @@ You should see a web interface as shown below.
 - Currently only 3 actions are supported; applying lipstick, drawing eyebrows, and applying blush on the cheeks. Make sure you specify the color that you want e.g apply some purple lipstick.
 - Open the Cyberwave simulation environment alongside the browser that is running your web app so that you can see both the motion of the robot and the makeup being applied on the image.
 
-  ![alt text](<Screenshot 2026-08-05 120806-1.png>)
+  ![alt text](<docs/Screenshot 2026-08-05 120806-1.png>)
